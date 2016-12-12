@@ -19,9 +19,6 @@
 
 package org.elasticsearch.client;
 
-import org.apache.http.entity.StringEntity;
-
-import java.io.IOException;
 import java.util.Objects;
 
 /**
@@ -34,27 +31,5 @@ public final class RestHighLevelClient {
 
     public RestHighLevelClient(RestClient client) {
         this.client = Objects.requireNonNull(client);
-    }
-
-    public SearchResponse performSearchRequest(SearchRequest request) throws IOException {
-        StringEntity entity = new StringEntity(request.searchSource().toString());
-        return new SearchResponse(this.client.performRequest("GET", buildSearchEndpoint(request), request.urlParams, entity));
-    }
-
-    public void performSearchRequestAsync(SearchRequest request, ResponseListener responseListener) throws IOException {
-        StringEntity entity = new StringEntity(request.searchSource().toString());
-        this.client.performRequestAsync("GET", buildSearchEndpoint(request), request.urlParams, entity, responseListener);
-    }
-
-    private static String buildSearchEndpoint(SearchRequest request) {
-        String indices = String.join(",", request.indices());
-        if (indices.length() > 0) {
-            indices = indices + "/";
-        }
-        String types = String.join(",", request.types());
-        if (types.length() > 0) {
-            indices = indices + "/";
-        }
-        return "/" + indices + types + "_search";
     }
 }
