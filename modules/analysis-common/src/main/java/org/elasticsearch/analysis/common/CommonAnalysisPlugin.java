@@ -68,7 +68,6 @@ import org.apache.lucene.analysis.util.ElisionFilter;
 import org.elasticsearch.index.analysis.CharFilterFactory;
 import org.elasticsearch.index.analysis.DelimitedPayloadTokenFilterFactory;
 import org.elasticsearch.index.analysis.HtmlStripCharFilterFactory;
-import org.elasticsearch.index.analysis.LimitTokenCountFilterFactory;
 import org.elasticsearch.index.analysis.PreConfiguredCharFilter;
 import org.elasticsearch.index.analysis.PreConfiguredTokenFilter;
 import org.elasticsearch.index.analysis.PreConfiguredTokenizer;
@@ -107,6 +106,18 @@ public class CommonAnalysisPlugin extends Plugin implements AnalysisPlugin {
         filters.put("ngram", NGramTokenFilterFactory::new);
         filters.put("edgeNGram", EdgeNGramTokenFilterFactory::new);
         filters.put("edge_ngram", EdgeNGramTokenFilterFactory::new);
+        filters.put("stemmer", StemmerTokenFilterFactory::new);
+        filters.put("stemmer_override", requriesAnalysisSettings(StemmerOverrideTokenFilterFactory::new));
+        filters.put("kstem", KStemTokenFilterFactory::new);
+        filters.put("dictionary_decompounder", requriesAnalysisSettings(DictionaryCompoundWordTokenFilterFactory::new));
+        filters.put("hyphenation_decompounder", requriesAnalysisSettings(HyphenationCompoundWordTokenFilterFactory::new));
+        filters.put("reverse", ReverseTokenFilterFactory::new);
+        filters.put("elision", ElisionTokenFilterFactory::new);
+        filters.put("truncate", requriesAnalysisSettings(TruncateTokenFilterFactory::new));
+        filters.put("limit", LimitTokenCountFilterFactory::new);
+        filters.put("common_grams", requriesAnalysisSettings(CommonGramsTokenFilterFactory::new));
+        filters.put("pattern_replace", requriesAnalysisSettings(PatternReplaceTokenFilterFactory::new));
+        filters.put("pattern_capture", requriesAnalysisSettings(PatternCaptureGroupTokenFilterFactory::new));
         return filters;
     }
 
@@ -122,8 +133,8 @@ public class CommonAnalysisPlugin extends Plugin implements AnalysisPlugin {
     @Override
     public Map<String, AnalysisProvider<TokenizerFactory>> getTokenizers() {
         Map<String, AnalysisProvider<TokenizerFactory>> tokenizers = new TreeMap<>();
-        tokenizers.put("simplepattern", SimplePatternTokenizerFactory::new);
-        tokenizers.put("simplepatternsplit", SimplePatternSplitTokenizerFactory::new);
+        tokenizers.put("simple_pattern", SimplePatternTokenizerFactory::new);
+        tokenizers.put("simple_pattern_split", SimplePatternSplitTokenizerFactory::new);
         return tokenizers;
     }
 

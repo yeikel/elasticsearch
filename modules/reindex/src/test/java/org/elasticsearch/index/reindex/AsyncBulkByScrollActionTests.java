@@ -452,7 +452,7 @@ public class AsyncBulkByScrollActionTests extends ESTestCase {
         SearchHit hit = new SearchHit(0, "id", new Text("type"), emptyMap());
         SearchHits hits = new SearchHits(new SearchHit[] { hit }, 0, 0);
         InternalSearchResponse internalResponse = new InternalSearchResponse(hits, null, null, null, false, false, 1);
-        SearchResponse searchResponse = new SearchResponse(internalResponse, scrollId(), 5, 4, randomLong(), null);
+        SearchResponse searchResponse = new SearchResponse(internalResponse, scrollId(), 5, 4, 0, randomLong(), null);
 
         if (randomBoolean()) {
             client.lastScroll.get().listener.onResponse(searchResponse);
@@ -561,18 +561,16 @@ public class AsyncBulkByScrollActionTests extends ESTestCase {
     }
 
     public void testCancelBeforeScrollResponse() throws Exception {
-        // We bail so early we don't need to pass in a half way valid response.
         cancelTaskCase((DummyAsyncBulkByScrollAction action) -> simulateScrollResponse(action, timeValueNanos(System.nanoTime()), 1,
-                null));
+                new ScrollableHitSource.Response(false, emptyList(), between(1, 100000), emptyList(), null)));
     }
 
     public void testCancelBeforeSendBulkRequest() throws Exception {
-        // We bail so early we don't need to pass in a half way valid request.
-        cancelTaskCase((DummyAsyncBulkByScrollAction action) -> action.sendBulkRequest(timeValueNanos(System.nanoTime()), null));
+        cancelTaskCase((DummyAsyncBulkByScrollAction action) ->
+            action.sendBulkRequest(timeValueNanos(System.nanoTime()), new BulkRequest()));
     }
 
     public void testCancelBeforeOnBulkResponse() throws Exception {
-        // We bail so early we don't need to pass in a half way valid response.
         cancelTaskCase((DummyAsyncBulkByScrollAction action) ->
                 action.onBulkResponse(timeValueNanos(System.nanoTime()), new BulkResponse(new BulkItemResponse[0], 0)));
     }

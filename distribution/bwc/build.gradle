@@ -101,18 +101,19 @@ if (enabled) {
     onlyIf { project.gradle.startParameter.isOffline() == false }
     dependsOn addUpstream
     workingDir = checkoutDir
-    commandLine = ['git', 'fetch', 'upstream']
+    commandLine = ['git', 'fetch', '--all']
   }
 
   // this is an Exec task so that the SHA that is checked out is logged
   task checkoutBwcBranch(type: Exec) {
+    def String refspec = System.getProperty("tests.bwc.refspec", "upstream/${bwcBranch}")
     dependsOn fetchLatest
     workingDir = checkoutDir
-    commandLine = ['git', 'checkout', "upstream/${bwcBranch}"]
+    commandLine = ['git', 'checkout', refspec]
   }
 
-  File bwcDeb = file("${checkoutDir}/distribution/zip/build/distributions/elasticsearch-${bwcVersion}.deb")
-  File bwcRpm = file("${checkoutDir}/distribution/zip/build/distributions/elasticsearch-${bwcVersion}.rpm")
+  File bwcDeb = file("${checkoutDir}/distribution/deb/build/distributions/elasticsearch-${bwcVersion}.deb")
+  File bwcRpm = file("${checkoutDir}/distribution/rpm/build/distributions/elasticsearch-${bwcVersion}.rpm")
   File bwcZip = file("${checkoutDir}/distribution/zip/build/distributions/elasticsearch-${bwcVersion}.zip")
   task buildBwcVersion(type: GradleBuild) {
     dependsOn checkoutBwcBranch
