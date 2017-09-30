@@ -76,8 +76,8 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
                                         Executor executor, SearchRequest request,
                                         ActionListener<SearchResponse> listener, GroupShardsIterator<SearchShardIterator> shardsIts,
                                         TransportSearchAction.SearchTimeProvider timeProvider, long clusterStateVersion,
-                                        SearchTask task, SearchPhaseResults<Result> resultConsumer) {
-        super(name, request, shardsIts, logger);
+                                        SearchTask task, SearchPhaseResults<Result> resultConsumer, int maxConcurrentShardRequests) {
+        super(name, request, shardsIts, logger, maxConcurrentShardRequests);
         this.timeProvider = timeProvider;
         this.logger = logger;
         this.searchTransportService = searchTransportService;
@@ -316,8 +316,8 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
 
     @Override
     protected void skipShard(SearchShardIterator iterator) {
-        super.skipShard(iterator);
         successfulOps.incrementAndGet();
         skippedOps.incrementAndGet();
+        super.skipShard(iterator);
     }
 }

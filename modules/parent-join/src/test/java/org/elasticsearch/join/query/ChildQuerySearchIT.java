@@ -26,7 +26,7 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.search.SearchType;
 import org.elasticsearch.action.support.WriteRequest.RefreshPolicy;
 import org.elasticsearch.common.lucene.search.function.CombineFunction;
-import org.elasticsearch.common.lucene.search.function.FiltersFunctionScoreQuery;
+import org.elasticsearch.common.lucene.search.function.FunctionScoreQuery;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.query.BoolQueryBuilder;
@@ -1128,7 +1128,7 @@ public class ChildQuerySearchIT extends ParentChildTestCase {
                 .addMapping("child", "_parent", "type=parent"));
         } else {
             assertAcked(prepareCreate("test")
-                .setSettings("index.refresh_interval", -1)
+                .setSettings(Settings.builder().put("index.refresh_interval", -1))
                 .addMapping("doc", buildParentJoinFieldMappingFromSimplifiedDef("join_field", true, "parent", "child")));
         }
         ensureGreen();
@@ -1511,7 +1511,7 @@ public class ChildQuerySearchIT extends ParentChildTestCase {
                 .addMapping("child", "_parent", "type=parent"));
         } else {
             assertAcked(prepareCreate("test")
-                .setSettings("index.refresh_interval", -1)
+                .setSettings(Settings.builder().put("index.refresh_interval", -1))
                 .addMapping("doc", buildParentJoinFieldMappingFromSimplifiedDef("join_field", true, "parent", "child")));
         }
         ensureGreen();
@@ -1676,7 +1676,7 @@ public class ChildQuerySearchIT extends ParentChildTestCase {
                                     weightFactorFunction(1)),
                                 new FunctionScoreQueryBuilder.FilterFunctionBuilder(QueryBuilders.termQuery("foo", "four"),
                                     weightFactorFunction(1))
-                        }).boostMode(CombineFunction.REPLACE).scoreMode(FiltersFunctionScoreQuery.ScoreMode.SUM), scoreMode)
+                        }).boostMode(CombineFunction.REPLACE).scoreMode(FunctionScoreQuery.ScoreMode.SUM), scoreMode)
                 .minMaxChildren(minChildren, maxChildren != null ? maxChildren : HasChildQueryBuilder.DEFAULT_MAX_CHILDREN);
 
         return client()

@@ -96,11 +96,6 @@ public class Netty4Transport extends TcpTransport<Channel> {
             (s) -> Integer.toString(EsExecutors.numberOfProcessors(s) * 2),
             (s) -> Setting.parseInt(s, 1, "transport.netty.worker_count"), Property.NodeScope);
 
-    public static final Setting<ByteSizeValue> NETTY_MAX_CUMULATION_BUFFER_CAPACITY =
-        Setting.byteSizeSetting("transport.netty.max_cumulation_buffer_capacity", new ByteSizeValue(-1), Property.NodeScope);
-    public static final Setting<Integer> NETTY_MAX_COMPOSITE_BUFFER_COMPONENTS =
-        Setting.intSetting("transport.netty.max_composite_buffer_components", -1, -1, Property.NodeScope);
-
     public static final Setting<ByteSizeValue> NETTY_RECEIVE_PREDICTOR_SIZE = Setting.byteSizeSetting(
             "transport.netty.receive_predictor_size", new ByteSizeValue(64, ByteSizeUnit.KB), Property.NodeScope);
     public static final Setting<ByteSizeValue> NETTY_RECEIVE_PREDICTOR_MIN =
@@ -111,8 +106,6 @@ public class Netty4Transport extends TcpTransport<Channel> {
         intSetting("transport.netty.boss_count", 1, 1, Property.NodeScope);
 
 
-    protected final ByteSizeValue maxCumulationBufferCapacity;
-    protected final int maxCompositeBufferComponents;
     protected final RecvByteBufAllocator recvByteBufAllocator;
     protected final int workerCount;
     protected final ByteSizeValue receivePredictorMin;
@@ -127,8 +120,6 @@ public class Netty4Transport extends TcpTransport<Channel> {
         super("netty", settings, threadPool, bigArrays, circuitBreakerService, namedWriteableRegistry, networkService);
         Netty4Utils.setAvailableProcessors(EsExecutors.PROCESSORS_SETTING.get(settings));
         this.workerCount = WORKER_COUNT.get(settings);
-        this.maxCumulationBufferCapacity = NETTY_MAX_CUMULATION_BUFFER_CAPACITY.get(settings);
-        this.maxCompositeBufferComponents = NETTY_MAX_COMPOSITE_BUFFER_COMPONENTS.get(settings);
 
         // See AdaptiveReceiveBufferSizePredictor#DEFAULT_XXX for default values in netty..., we can use higher ones for us, even fixed one
         this.receivePredictorMin = NETTY_RECEIVE_PREDICTOR_MIN.get(settings);
@@ -340,7 +331,17 @@ public class Netty4Transport extends TcpTransport<Channel> {
     }
 
     @Override
-    protected void closeChannels(final List<Channel> channels, boolean blocking) throws IOException {
+    protected void closeChannels(final List<Channel> channels, boolean blocking, boolean closingTransport) throws IOException {
+        if (closingTransport) {
+            for (Channel channel : channels) {
+                /* We set SO_LINGER timeout to 0 to ensure that when we shutdown the node we don't have a gazillion connections sitting
+                 * in TIME_WAIT to free up resources quickly. This is really the only part where we close the connection from the server
+                 * side otherwise the client (node) initiates the TCP closing sequence which doesn't cause these issues. Setting this
+                 * by default from the beginning can have unexpected side-effects an should be avoided, our protocol is designed
+                 * in a way that clients close connection which is how it should be*/
+                channel.config().setOption(ChannelOption.SO_LINGER, 0);
+            }
+        }
         if (blocking) {
             Netty4Utils.closeChannels(channels);
         } else {

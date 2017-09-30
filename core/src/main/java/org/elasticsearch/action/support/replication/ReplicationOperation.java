@@ -27,12 +27,12 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.UnavailableShardsException;
 import org.elasticsearch.action.support.ActiveShardCount;
 import org.elasticsearch.action.support.TransportActions;
-import org.elasticsearch.cluster.routing.AllocationId;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.util.set.Sets;
+import org.elasticsearch.index.seqno.SequenceNumbersService;
 import org.elasticsearch.index.shard.ReplicationGroup;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.rest.RestStatus;
@@ -42,13 +42,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 public class ReplicationOperation<
             Request extends ReplicationRequest<Request>,
@@ -108,7 +105,6 @@ public class ReplicationOperation<
         primary.updateLocalCheckpointForShard(primaryRouting.allocationId().getId(), primary.localCheckpoint());
         final ReplicaRequest replicaRequest = primaryResult.replicaRequest();
         if (replicaRequest != null) {
-            assert replicaRequest.primaryTerm() > 0 : "replicaRequest doesn't have a primary term";
             if (logger.isTraceEnabled()) {
                 logger.trace("[{}] op [{}] completed on primary for request [{}]", primaryId, opType, request);
             }
@@ -136,7 +132,7 @@ public class ReplicationOperation<
         for (String allocationId : Sets.difference(inSyncAllocationIds, indexShardRoutingTable.getAllAllocationIds())) {
             // mark copy as stale
             pendingActions.incrementAndGet();
-            replicasProxy.markShardCopyAsStaleIfNeeded(replicaRequest.shardId(), allocationId, replicaRequest.primaryTerm(),
+            replicasProxy.markShardCopyAsStaleIfNeeded(replicaRequest.shardId(), allocationId,
                 ReplicationOperation.this::decPendingAndFinishIfNeeded,
                 ReplicationOperation.this::onPrimaryDemoted,
                 throwable -> decPendingAndFinishIfNeeded()
@@ -178,6 +174,7 @@ public class ReplicationOperation<
                 successfulShards.incrementAndGet();
                 try {
                     primary.updateLocalCheckpointForShard(shard.allocationId().getId(), response.localCheckpoint());
+                    primary.updateGlobalCheckpointForShard(shard.allocationId().getId(), response.globalCheckpoint());
                 } catch (final AlreadyClosedException e) {
                     // okay, the index was deleted or this shard was never activated after a relocation; fall through and finish normally
                 } catch (final Exception e) {
@@ -205,7 +202,7 @@ public class ReplicationOperation<
                     shardReplicaFailures.add(new ReplicationResponse.ShardInfo.Failure(
                         shard.shardId(), shard.currentNodeId(), replicaException, restStatus, false));
                     String message = String.format(Locale.ROOT, "failed to perform %s on replica %s", opType, shard);
-                    replicasProxy.failShardIfNeeded(shard, replicaRequest.primaryTerm(), message,
+                    replicasProxy.failShardIfNeeded(shard, message,
                             replicaException, ReplicationOperation.this::decPendingAndFinishIfNeeded,
                             ReplicationOperation.this::onPrimaryDemoted, throwable -> decPendingAndFinishIfNeeded());
                 }
@@ -321,6 +318,14 @@ public class ReplicationOperation<
         void updateLocalCheckpointForShard(String allocationId, long checkpoint);
 
         /**
+         * Update the local knowledge of the global checkpoint for the specified allocation ID.
+         *
+         * @param allocationId     the allocation ID to update the global checkpoint for
+         * @param globalCheckpoint the global checkpoint
+         */
+        void updateGlobalCheckpointForShard(String allocationId, long globalCheckpoint);
+
+        /**
          * Returns the local checkpoint on the primary shard.
          *
          * @return the local checkpoint
@@ -348,7 +353,7 @@ public class ReplicationOperation<
     public interface Replicas<RequestT extends ReplicationRequest<RequestT>> {
 
         /**
-         * Performs the the specified request on the specified replica.
+         * Performs the specified request on the specified replica.
          *
          * @param replica          the shard this request should be executed on
          * @param replicaRequest   the operation to perform
@@ -363,7 +368,6 @@ public class ReplicationOperation<
          * implementation.
          *
          * @param replica          shard to fail
-         * @param primaryTerm      the primary term of the primary shard when requesting the failure
          * @param message          a (short) description of the reason
          * @param exception        the original exception which caused the ReplicationOperation to request the shard to be failed
          * @param onSuccess        a callback to call when the shard has been successfully removed from the active set.
@@ -371,7 +375,7 @@ public class ReplicationOperation<
          *                         by the master.
          * @param onIgnoredFailure a callback to call when failing a shard has failed, but it that failure can be safely ignored and the
          */
-        void failShardIfNeeded(ShardRouting replica, long primaryTerm, String message, Exception exception, Runnable onSuccess,
+        void failShardIfNeeded(ShardRouting replica, String message, Exception exception, Runnable onSuccess,
                                Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure);
 
         /**
@@ -381,23 +385,34 @@ public class ReplicationOperation<
          *
          * @param shardId          shard id
          * @param allocationId     allocation id to remove from the set of in-sync allocation ids
-         * @param primaryTerm      the primary term of the primary shard when requesting the failure
          * @param onSuccess        a callback to call when the allocation id has been successfully removed from the in-sync set.
          * @param onPrimaryDemoted a callback to call when the request failed because the current primary was already demoted
          *                         by the master.
          * @param onIgnoredFailure a callback to call when the request failed, but the failure can be safely ignored.
          */
-        void markShardCopyAsStaleIfNeeded(ShardId shardId, String allocationId, long primaryTerm, Runnable onSuccess,
+        void markShardCopyAsStaleIfNeeded(ShardId shardId, String allocationId, Runnable onSuccess,
                                           Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure);
     }
 
     /**
-     * An interface to encapsulate the metadata needed from replica shards when they respond to operations performed on them
+     * An interface to encapsulate the metadata needed from replica shards when they respond to operations performed on them.
      */
     public interface ReplicaResponse {
 
-        /** the local check point for the shard. see {@link org.elasticsearch.index.seqno.SequenceNumbersService#getLocalCheckpoint()} */
+        /**
+         * The local checkpoint for the shard. See {@link SequenceNumbersService#getLocalCheckpoint()}.
+         *
+         * @return the local checkpoint
+         **/
         long localCheckpoint();
+
+        /**
+         * The global checkpoint for the shard. See {@link SequenceNumbersService#getGlobalCheckpoint()}.
+         *
+         * @return the global checkpoint
+         **/
+        long globalCheckpoint();
+
     }
 
     public static class RetryOnPrimaryException extends ElasticsearchException {

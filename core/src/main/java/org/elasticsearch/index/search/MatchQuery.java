@@ -22,6 +22,7 @@ package org.elasticsearch.index.search;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.miscellaneous.DisableGraphAttribute;
 import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.queries.ExtendedCommonTermsQuery;
 import org.apache.lucene.search.BooleanClause;
@@ -41,13 +42,12 @@ import org.apache.lucene.search.spans.SpanNearQuery;
 import org.apache.lucene.search.spans.SpanOrQuery;
 import org.apache.lucene.search.spans.SpanQuery;
 import org.apache.lucene.search.spans.SpanTermQuery;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.QueryBuilder;
 import org.elasticsearch.ElasticsearchException;
-import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
-import org.elasticsearch.common.lucene.all.AllTermQuery;
 import org.elasticsearch.common.lucene.search.MultiPhrasePrefixQuery;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.unit.Fuzziness;
@@ -57,6 +57,9 @@ import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.index.query.support.QueryParsers;
 
 import java.io.IOException;
+
+import static org.elasticsearch.common.lucene.search.Queries.newLenientFieldQuery;
+import static org.elasticsearch.common.lucene.search.Queries.newUnmappedFieldQuery;
 
 public class MatchQuery {
 
@@ -163,6 +166,8 @@ public class MatchQuery {
 
     protected Float commonTermsCutoff = null;
 
+    protected boolean autoGenerateSynonymsPhraseQuery = true;
+
     public MatchQuery(QueryShardContext context) {
         this.context = context;
     }
@@ -222,25 +227,28 @@ public class MatchQuery {
         this.zeroTermsQuery = zeroTermsQuery;
     }
 
+    public void setAutoGenerateSynonymsPhraseQuery(boolean enabled) {
+        this.autoGenerateSynonymsPhraseQuery = enabled;
+    }
+
     protected Analyzer getAnalyzer(MappedFieldType fieldType, boolean quoted) {
         if (analyzer == null) {
-            if (fieldType != null) {
-                return quoted ? context.getSearchQuoteAnalyzer(fieldType) : context.getSearchAnalyzer(fieldType);
-            }
-            return quoted ? context.getMapperService().searchQuoteAnalyzer() : context.getMapperService().searchAnalyzer();
+            return quoted ? context.getSearchQuoteAnalyzer(fieldType) : context.getSearchAnalyzer(fieldType);
         } else {
             return analyzer;
         }
     }
 
+    private boolean hasPositions(MappedFieldType fieldType) {
+        return fieldType.indexOptions().compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) >= 0;
+    }
+
     public Query parse(Type type, String fieldName, Object value) throws IOException {
-        final String field;
         MappedFieldType fieldType = context.fieldMapper(fieldName);
-        if (fieldType != null) {
-            field = fieldType.name();
-        } else {
-            field = fieldName;
+        if (fieldType == null) {
+            return newUnmappedFieldQuery(fieldName);
         }
+        final String field = fieldType.name();
 
         /*
          * If the user forced an analyzer we really don't care if they are
@@ -251,7 +259,7 @@ public class MatchQuery {
          * passing through QueryBuilder.
          */
         boolean noForcedAnalyzer = this.analyzer == null;
-        if (fieldType != null && fieldType.tokenized() == false && noForcedAnalyzer) {
+        if (fieldType.tokenized() == false && noForcedAnalyzer) {
             return blendTermQuery(new Term(fieldName, value.toString()), fieldType);
         }
 
@@ -259,6 +267,11 @@ public class MatchQuery {
         assert analyzer != null;
         MatchQueryBuilder builder = new MatchQueryBuilder(analyzer, fieldType);
         builder.setEnablePositionIncrements(this.enablePositionIncrements);
+        if (hasPositions(fieldType)) {
+            builder.setAutoGenerateMultiTermSynonymsPhraseQuery(this.autoGenerateSynonymsPhraseQuery);
+        } else {
+            builder.setAutoGenerateMultiTermSynonymsPhraseQuery(false);
+        }
 
         Query query = null;
         switch (type) {
@@ -286,12 +299,12 @@ public class MatchQuery {
         }
     }
 
-    protected final Query termQuery(MappedFieldType fieldType, Object value, boolean lenient) {
+    protected final Query termQuery(MappedFieldType fieldType, BytesRef value, boolean lenient) {
         try {
             return fieldType.termQuery(value, context);
         } catch (RuntimeException e) {
             if (lenient) {
-                return null;
+                return newLenientFieldQuery(fieldType.name(), e);
             }
             throw e;
         }
@@ -311,7 +324,7 @@ public class MatchQuery {
         /**
          * Creates a new QueryBuilder using the given analyzer.
          */
-        MatchQueryBuilder(Analyzer analyzer, @Nullable MappedFieldType mapper) {
+        MatchQueryBuilder(Analyzer analyzer, MappedFieldType mapper) {
             super(analyzer);
             this.mapper = mapper;
         }
@@ -324,6 +337,20 @@ public class MatchQuery {
         @Override
         protected Query newSynonymQuery(Term[] terms) {
             return blendTermsQuery(terms, mapper);
+        }
+
+        @Override
+        protected Query analyzePhrase(String field, TokenStream stream, int slop) throws IOException {
+            if (hasPositions(mapper) == false) {
+                IllegalStateException exc =
+                    new IllegalStateException("field:[" + field + "] was indexed without position data; cannot run PhraseQuery");
+                if (lenient) {
+                    return newLenientFieldQuery(field, exc);
+                } else {
+                    throw exc;
+                }
+            }
+            return super.analyzePhrase(field, stream, slop);
         }
 
         /**
@@ -390,9 +417,6 @@ public class MatchQuery {
             } else if (innerQuery instanceof TermQuery) {
                 prefixQuery.add(((TermQuery) innerQuery).getTerm());
                 return boost == 1 ? prefixQuery : new BoostQuery(prefixQuery, boost);
-            } else if (innerQuery instanceof AllTermQuery) {
-                prefixQuery.add(((AllTermQuery) innerQuery).getTerm());
-                return boost == 1 ? prefixQuery : new BoostQuery(prefixQuery, boost);
             }
             return query;
         }
@@ -454,30 +478,21 @@ public class MatchQuery {
 
     protected Query blendTermQuery(Term term, MappedFieldType fieldType) {
         if (fuzziness != null) {
-            if (fieldType != null) {
-                try {
-                    Query query = fieldType.fuzzyQuery(term.text(), fuzziness, fuzzyPrefixLength, maxExpansions, transpositions);
-                    if (query instanceof FuzzyQuery) {
-                        QueryParsers.setRewriteMethod((FuzzyQuery) query, fuzzyRewriteMethod);
-                    }
-                    return query;
-                } catch (RuntimeException e) {
-                    if (lenient) {
-                        return null;
-                    } else {
-                        throw e;
-                    }
+            try {
+                Query query = fieldType.fuzzyQuery(term.text(), fuzziness, fuzzyPrefixLength, maxExpansions, transpositions);
+                if (query instanceof FuzzyQuery) {
+                    QueryParsers.setRewriteMethod((FuzzyQuery) query, fuzzyRewriteMethod);
+                }
+                return query;
+            } catch (RuntimeException e) {
+                if (lenient) {
+                    return newLenientFieldQuery(fieldType.name(), e);
+                } else {
+                    throw e;
                 }
             }
-            int edits = fuzziness.asDistance(term.text());
-            FuzzyQuery query = new FuzzyQuery(term, edits, fuzzyPrefixLength, maxExpansions, transpositions);
-            QueryParsers.setRewriteMethod(query, fuzzyRewriteMethod);
-            return query;
         }
-        if (fieldType != null) {
-            return termQuery(fieldType, term.bytes(), lenient);
-        }
-        return new TermQuery(term);
+        return termQuery(fieldType, term.bytes(), lenient);
     }
 
 }

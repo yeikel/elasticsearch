@@ -131,7 +131,7 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
         private final AtomicInteger docId = new AtomicInteger();
         boolean closed = false;
         private final PrimaryReplicaSyncer primaryReplicaSyncer = new PrimaryReplicaSyncer(Settings.EMPTY, new TaskManager(Settings.EMPTY),
-            (request, parentTask, primaryAllocationId, listener) -> {
+            (request, parentTask, primaryAllocationId, primaryTerm, listener) -> {
                 try {
                     new ResyncAction(request, listener, ReplicationGroup.this).execute();
                 } catch (Exception e) {
@@ -141,7 +141,7 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
 
         ReplicationGroup(final IndexMetaData indexMetaData) throws IOException {
             final ShardRouting primaryRouting = this.createShardRouting("s0", true);
-            primary = newShard(primaryRouting, indexMetaData, null, getEngineFactory(primaryRouting));
+            primary = newShard(primaryRouting, indexMetaData, null, getEngineFactory(primaryRouting), () -> {});
             replicas = new ArrayList<>();
             this.indexMetaData = indexMetaData;
             updateAllocationIDsOnPrimary();
@@ -238,7 +238,7 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
         public IndexShard addReplica() throws IOException {
             final ShardRouting replicaRouting = createShardRouting("s" + replicaId.incrementAndGet(), false);
             final IndexShard replica =
-                newShard(replicaRouting, indexMetaData, null, getEngineFactory(replicaRouting));
+                newShard(replicaRouting, indexMetaData, null, getEngineFactory(replicaRouting), () -> {});
             addReplica(replica);
             return replica;
         }
@@ -259,8 +259,8 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
                 false, ShardRoutingState.INITIALIZING,
                 RecoverySource.PeerRecoverySource.INSTANCE);
 
-            final IndexShard newReplica = newShard(shardRouting, shardPath, indexMetaData, null,
-                    getEngineFactory(shardRouting));
+            final IndexShard newReplica =
+                    newShard(shardRouting, shardPath, indexMetaData, null, getEngineFactory(shardRouting), () -> {});
             replicas.add(newReplica);
             updateAllocationIDsOnPrimary();
             return newReplica;
@@ -315,7 +315,7 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
             return routingTable.build();
         }
 
-        synchronized boolean removeReplica(IndexShard replica) throws IOException {
+        public synchronized boolean removeReplica(IndexShard replica) throws IOException {
             final boolean removed = replicas.remove(replica);
             if (removed) {
                 updateAllocationIDsOnPrimary();
@@ -473,14 +473,17 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
 
             @Override
             public PrimaryResult perform(Request request) throws Exception {
-                PrimaryResult response = performOnPrimary(replicationGroup.primary, request);
-                response.replicaRequest().primaryTerm(replicationGroup.primary.getPrimaryTerm());
-                return response;
+                return performOnPrimary(replicationGroup.primary, request);
             }
 
             @Override
             public void updateLocalCheckpointForShard(String allocationId, long checkpoint) {
                 replicationGroup.getPrimary().updateLocalCheckpointForShard(allocationId, checkpoint);
+            }
+
+            @Override
+            public void updateGlobalCheckpointForShard(String allocationId, long globalCheckpoint) {
+                replicationGroup.getPrimary().updateGlobalCheckpointForShard(allocationId, globalCheckpoint);
             }
 
             @Override
@@ -512,7 +515,7 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
                 IndexShard replica = replicationGroup.replicas.stream()
                         .filter(s -> replicaRouting.isSameAllocation(s.routingEntry())).findFirst().get();
                 replica.acquireReplicaOperationPermit(
-                        request.primaryTerm(),
+                        replicationGroup.primary.getPrimaryTerm(),
                         globalCheckpoint,
                         new ActionListener<Releasable>() {
                             @Override
@@ -520,7 +523,7 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
                                 try {
                                     performOnReplica(request, replica);
                                     releasable.close();
-                                    listener.onResponse(new ReplicaResponse(replica.getLocalCheckpoint()));
+                                    listener.onResponse(new ReplicaResponse(replica.getLocalCheckpoint(), replica.getGlobalCheckpoint()));
                                 } catch (final Exception e) {
                                     Releasables.closeWhileHandlingException(releasable);
                                     listener.onFailure(e);
@@ -536,14 +539,14 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
             }
 
             @Override
-            public void failShardIfNeeded(ShardRouting replica, long primaryTerm, String message, Exception exception,
+            public void failShardIfNeeded(ShardRouting replica, String message, Exception exception,
                                           Runnable onSuccess, Consumer<Exception> onPrimaryDemoted,
                                           Consumer<Exception> onIgnoredFailure) {
                 throw new UnsupportedOperationException();
             }
 
             @Override
-            public void markShardCopyAsStaleIfNeeded(ShardId shardId, String allocationId, long primaryTerm, Runnable onSuccess,
+            public void markShardCopyAsStaleIfNeeded(ShardId shardId, String allocationId, Runnable onSuccess,
                                                      Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure) {
                 throw new UnsupportedOperationException();
             }
@@ -602,7 +605,6 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
         final TransportWriteAction.WritePrimaryResult<BulkShardRequest, BulkShardResponse> result =
                 TransportShardBulkAction.performOnPrimary(request, primary, null,
                 System::currentTimeMillis, new TransportShardBulkActionTests.NoopMappingUpdatePerformer());
-        request.primaryTerm(primary.getPrimaryTerm());
         TransportWriteActionTestHelper.performPostWriteActions(primary, request, result.location, logger);
         return result;
     }
@@ -682,7 +684,6 @@ public abstract class ESIndexLevelReplicationTestCase extends IndexShardTestCase
         final TransportWriteAction.WritePrimaryResult<ResyncReplicationRequest, ResyncReplicationResponse> result =
             new TransportWriteAction.WritePrimaryResult<>(TransportResyncReplicationAction.performOnPrimary(request, primary),
                 new ResyncReplicationResponse(), null, null, primary, logger);
-        request.primaryTerm(primary.getPrimaryTerm());
         TransportWriteActionTestHelper.performPostWriteActions(primary, request, result.location, logger);
         return result;
     }

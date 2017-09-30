@@ -22,10 +22,12 @@ the same response objects.
 
 --
 
-include::usage.asciidoc[]
+:doc-tests: {docdir}/../../client/rest-high-level/src/test/java/org/elasticsearch/client/documentation
 
-include::apis.asciidoc[]
-
-include::apis/index.asciidoc[]
-
+include::getting-started.asciidoc[]
+include::supported-apis.asciidoc[]
+include::java-builders.asciidoc[]
+include::migration.asciidoc[]
 include::../license.asciidoc[]
+
+:doc-tests!:
