@@ -47,6 +47,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -328,7 +329,7 @@ public class Setting<T> implements ToXContentObject {
      * Returns <code>true</code> iff this setting is present in the given settings object. Otherwise <code>false</code>
      */
     public boolean exists(Settings settings) {
-        return settings.getAsMap().containsKey(getKey());
+        return settings.keySet().contains(getKey());
     }
 
     /**
@@ -529,7 +530,7 @@ public class Setting<T> implements ToXContentObject {
         }
 
         private Stream<String> matchStream(Settings settings) {
-            return settings.getAsMap().keySet().stream().filter((key) -> match(key)).map(settingKey -> key.getConcreteString(settingKey));
+            return settings.keySet().stream().filter((key) -> match(key)).map(settingKey -> key.getConcreteString(settingKey));
         }
 
         AbstractScopedSettings.SettingUpdater<Map<AbstractScopedSettings.SettingUpdater<T>, T>> newAffixUpdater(
@@ -736,8 +737,8 @@ public class Setting<T> implements ToXContentObject {
 
         @Override
         public boolean exists(Settings settings) {
-            for (Map.Entry<String, String> entry : settings.getAsMap().entrySet()) {
-                if (entry.getKey().startsWith(key)) {
+            for (String settingsKey : settings.keySet()) {
+                if (settingsKey.startsWith(key)) {
                     return true;
                 }
             }
@@ -746,13 +747,11 @@ public class Setting<T> implements ToXContentObject {
 
         @Override
         public void diff(Settings.Builder builder, Settings source, Settings defaultSettings) {
-            Map<String, String> leftGroup = get(source).getAsMap();
+            Set<String> leftGroup = get(source).keySet();
             Settings defaultGroup = get(defaultSettings);
-            for (Map.Entry<String, String> entry : defaultGroup.getAsMap().entrySet()) {
-                if (leftGroup.containsKey(entry.getKey()) == false) {
-                    builder.put(getKey() + entry.getKey(), entry.getValue());
-                }
-            }
+
+            builder.put(Settings.builder().put(defaultGroup.filter(k -> leftGroup.contains(k) == false), false)
+                    .normalizePrefix(getKey()).build(), false);
         }
 
         @Override
@@ -779,7 +778,7 @@ public class Setting<T> implements ToXContentObject {
                         validator.accept(currentSettings);
                     } catch (Exception | AssertionError e) {
                         throw new IllegalArgumentException("illegal value can't update [" + key + "] from ["
-                                + previousSettings.getAsMap() + "] to [" + currentSettings.getAsMap() + "]", e);
+                                + previousSettings + "] to [" + currentSettings+ "]", e);
                     }
                     return currentSettings;
                 }
@@ -805,14 +804,14 @@ public class Setting<T> implements ToXContentObject {
 
         private ListSetting(String key, Function<Settings, List<String>> defaultStringValue, Function<String, List<T>> parser,
                             Property... properties) {
-            super(new ListKey(key), (s) -> Setting.arrayToParsableString(defaultStringValue.apply(s).toArray(Strings.EMPTY_ARRAY)), parser,
+            super(new ListKey(key), (s) -> Setting.arrayToParsableString(defaultStringValue.apply(s)), parser,
                 properties);
             this.defaultStringValue = defaultStringValue;
         }
 
         @Override
         public String getRaw(Settings settings) {
-            String[] array = settings.getAsArray(getKey(), null);
+            List<String> array = settings.getAsList(getKey(), null);
             return array == null ? defaultValue.apply(settings) : arrayToParsableString(array);
         }
 
@@ -822,19 +821,13 @@ public class Setting<T> implements ToXContentObject {
         }
 
         @Override
-        public boolean exists(Settings settings) {
-            boolean exists = super.exists(settings);
-            return exists || settings.get(getKey() + ".0") != null;
-        }
-
-        @Override
         public void diff(Settings.Builder builder, Settings source, Settings defaultSettings) {
             if (exists(source) == false) {
-                String[] asArray = defaultSettings.getAsArray(getKey(), null);
-                if (asArray == null) {
-                    builder.putArray(getKey(), defaultStringValue.apply(defaultSettings));
+                List<String> asList = defaultSettings.getAsList(getKey(), null);
+                if (asList == null) {
+                    builder.putList(getKey(), defaultStringValue.apply(defaultSettings));
                 } else {
-                    builder.putArray(getKey(), asArray);
+                    builder.putList(getKey(), asList);
                 }
             }
         }
@@ -1094,7 +1087,7 @@ public class Setting<T> implements ToXContentObject {
         }
     }
 
-    private static String arrayToParsableString(String[] array) {
+    private static String arrayToParsableString(List<String> array) {
         try {
             XContentBuilder builder = XContentBuilder.builder(XContentType.JSON.xContent());
             builder.startArray();
