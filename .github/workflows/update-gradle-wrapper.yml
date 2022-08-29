@@ -2,7 +2,7 @@ name: Update Gradle Wrapper
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "*/5 * * * *"
 
 jobs:
   update-gradle-wrapper:
@@ -10,6 +10,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
-
       - name: Update Gradle Wrapper
         uses: yeikel/update-gradle-wrapper-action@3d36a42f752124a763a97a4ccfed4da867775d8e
+        with:
+         labels: dependencies
+         distributions-base-url: "https://mycustomhost.com/distributions"
