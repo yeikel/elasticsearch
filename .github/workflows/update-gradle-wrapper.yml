@@ -12,4 +12,4 @@ jobs:
         uses: yeikel/update-gradle-wrapper-action@b7ab23d6fa1abab02767e5aaf7077bb20f1e9486
         with:
          labels: dependencies
-         distributions-base-url: "https://mycustomhost.com/distributions"
+         distributions-base-url: "https://services.gradle.org/distributions"
