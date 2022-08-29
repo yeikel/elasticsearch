@@ -9,7 +9,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Update Gradle Wrapper
-        uses: yeikel/update-gradle-wrapper-action@e76a8741243d8507a40f54010077533cac8d0561
+        uses: yeikel/update-gradle-wrapper-action@b7ab23d6fa1abab02767e5aaf7077bb20f1e9486
         with:
          labels: dependencies
          distributions-base-url: "https://mycustomhost.com/distributions"
