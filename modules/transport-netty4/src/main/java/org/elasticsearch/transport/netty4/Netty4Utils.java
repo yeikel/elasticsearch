@@ -1,20 +1,10 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.transport.netty4;
@@ -24,47 +14,40 @@ import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelPromise;
+import io.netty.channel.DefaultChannelPromise;
 import io.netty.util.NettyRuntime;
-import io.netty.util.internal.logging.InternalLogger;
-import io.netty.util.internal.logging.InternalLoggerFactory;
-import org.apache.logging.log4j.Logger;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.ImmediateEventExecutor;
+
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefIterator;
-import org.elasticsearch.common.Booleans;
+import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.logging.ESLoggerFactory;
+import org.elasticsearch.common.bytes.ReleasableBytesReference;
+import org.elasticsearch.common.recycler.Recycler;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.core.Booleans;
+import org.elasticsearch.core.RefCounted;
+import org.elasticsearch.core.SuppressForbidden;
+import org.elasticsearch.http.HttpBody;
+import org.elasticsearch.transport.TransportException;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
-import java.util.Queue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 
 public class Netty4Utils {
 
-    static {
-        InternalLoggerFactory.setDefaultFactory(new InternalLoggerFactory() {
-
-            @Override
-            public InternalLogger newInstance(final String name) {
-                return new Netty4InternalESLogger(name);
-            }
-
-        });
-    }
-
-    public static void setup() {
-
-    }
-
-    private static AtomicBoolean isAvailableProcessorsSet = new AtomicBoolean();
+    private static final AtomicBoolean isAvailableProcessorsSet = new AtomicBoolean();
 
     /**
      * Set the number of available processors that Netty uses for sizing various resources (e.g., thread pools).
@@ -75,7 +58,7 @@ public class Netty4Utils {
     public static void setAvailableProcessors(final int availableProcessors) {
         // we set this to false in tests to avoid tests that randomly set processors from stepping on each other
         final boolean set = Booleans.parseBoolean(System.getProperty("es.set.netty.runtime.available.processors", "true"));
-        if (!set) {
+        if (set == false) {
             return;
         }
 
@@ -91,10 +74,11 @@ public class Netty4Utils {
              * in Netty and our previous value did not take, bail.
              */
             final String message = String.format(
-                    Locale.ROOT,
-                    "available processors value [%d] did not match current value [%d]",
-                    availableProcessors,
-                    NettyRuntime.availableProcessors());
+                Locale.ROOT,
+                "available processors value [%d] did not match current value [%d]",
+                availableProcessors,
+                NettyRuntime.availableProcessors()
+            );
             throw new IllegalStateException(message);
         }
     }
@@ -104,26 +88,31 @@ public class Netty4Utils {
      * pages of the BytesReference. Don't free the bytes of reference before the ByteBuf goes out of scope.
      */
     public static ByteBuf toByteBuf(final BytesReference reference) {
-        if (reference.length() == 0) {
-            return Unpooled.EMPTY_BUFFER;
+        if (reference.hasArray()) {
+            return Unpooled.wrappedBuffer(reference.array(), reference.arrayOffset(), reference.length());
         }
-        if (reference instanceof ByteBufBytesReference) {
-            return ((ByteBufBytesReference) reference).toByteBuf();
-        } else {
-            final BytesRefIterator iterator = reference.iterator();
-            // usually we have one, two, or three components from the header, the message, and a buffer
-            final List<ByteBuf> buffers = new ArrayList<>(3);
-            try {
-                BytesRef slice;
-                while ((slice = iterator.next()) != null) {
-                    buffers.add(Unpooled.wrappedBuffer(slice.bytes, slice.offset, slice.length));
-                }
-                final CompositeByteBuf composite = Unpooled.compositeBuffer(buffers.size());
+        return compositeReferenceToByteBuf(reference);
+    }
+
+    private static ByteBuf compositeReferenceToByteBuf(BytesReference reference) {
+        final BytesRefIterator iterator = reference.iterator();
+        // usually we have one, two, or three components from the header, the message, and a buffer
+        final List<ByteBuf> buffers = new ArrayList<>(3);
+        try {
+            BytesRef slice;
+            while ((slice = iterator.next()) != null) {
+                buffers.add(Unpooled.wrappedBuffer(slice.bytes, slice.offset, slice.length));
+            }
+
+            if (buffers.size() == 1) {
+                return buffers.get(0);
+            } else {
+                CompositeByteBuf composite = Unpooled.compositeBuffer(buffers.size());
                 composite.addComponents(true, buffers);
                 return composite;
-            } catch (IOException ex) {
-                throw new AssertionError("no IO happens here", ex);
             }
+        } catch (IOException ex) {
+            throw new AssertionError("no IO happens here", ex);
         }
     }
 
@@ -131,105 +120,130 @@ public class Netty4Utils {
      * Wraps the given ChannelBuffer with a BytesReference
      */
     public static BytesReference toBytesReference(final ByteBuf buffer) {
-        return toBytesReference(buffer, buffer.readableBytes());
+        final int readableBytes = buffer.readableBytes();
+        if (readableBytes == 0) {
+            return BytesArray.EMPTY;
+        } else if (buffer.hasArray()) {
+            return new BytesArray(buffer.array(), buffer.arrayOffset() + buffer.readerIndex(), readableBytes);
+        } else {
+            final ByteBuffer[] byteBuffers = buffer.nioBuffers();
+            return BytesReference.fromByteBuffers(byteBuffers);
+        }
     }
 
     /**
-     * Wraps the given ChannelBuffer with a BytesReference of a given size
+     * Wrap Netty's {@link ByteBuf} into {@link ReleasableBytesReference} and delegating reference count to ByteBuf.
      */
-    static BytesReference toBytesReference(final ByteBuf buffer, final int size) {
-        return new ByteBufBytesReference(buffer, size);
+    public static ReleasableBytesReference toReleasableBytesReference(final ByteBuf buffer) {
+        return new ReleasableBytesReference(toBytesReference(buffer), toRefCounted(buffer));
     }
 
-    public static void closeChannels(final Collection<Channel> channels) throws IOException {
-        IOException closingExceptions = null;
-        final List<ChannelFuture> futures = new ArrayList<>();
-        for (final Channel channel : channels) {
+    static ByteBufRefCounted toRefCounted(final ByteBuf buf) {
+        return new ByteBufRefCounted(buf);
+    }
+
+    record ByteBufRefCounted(ByteBuf buffer) implements RefCounted {
+
+        public int refCnt() {
+            return buffer.refCnt();
+        }
+
+        @Override
+        public void incRef() {
+            buffer.retain();
+        }
+
+        @Override
+        public boolean tryIncRef() {
+            if (hasReferences() == false) {
+                return false;
+            }
             try {
-                if (channel != null && channel.isOpen()) {
-                    futures.add(channel.close());
-                }
-            } catch (Exception e) {
-                if (closingExceptions == null) {
-                    closingExceptions = new IOException("failed to close channels");
-                }
-                closingExceptions.addSuppressed(e);
+                buffer.retain();
+            } catch (RuntimeException e) {
+                assert hasReferences() == false;
+                return false;
             }
-        }
-        for (final ChannelFuture future : futures) {
-            future.awaitUninterruptibly();
+            return true;
         }
 
-        if (closingExceptions != null) {
-            throw closingExceptions;
+        @Override
+        public boolean decRef() {
+            return buffer.release();
         }
+
+        @Override
+        public boolean hasReferences() {
+            return buffer.refCnt() > 0;
+        }
+    }
+
+    public static HttpBody.Full fullHttpBodyFrom(final ByteBuf buf) {
+        return new HttpBody.ByteRefHttpBody(toReleasableBytesReference(buf));
+    }
+
+    public static Recycler<BytesRef> createRecycler(Settings settings) {
+        // If this method is called by super ctor the processors will not be set. Accessing NettyAllocator initializes netty's internals
+        // setting the processors. We must do it ourselves first just in case.
+        setAvailableProcessors(EsExecutors.allocatedProcessors(settings));
+        return NettyAllocator.getRecycler();
     }
 
     /**
-     * If the specified cause is an unrecoverable error, this method will rethrow the cause on a separate thread so that it can not be
-     * caught and bubbles up to the uncaught exception handler.
-     *
-     * @param cause the throwable to test
+     * Calls {@link Channel#writeAndFlush} to write the given message to the given channel, but ensures that the listener is completed even
+     * if the event loop is concurrently shutting down since Netty does not offer this guarantee.
      */
-    public static void maybeDie(final Throwable cause) {
-        final Optional<Error> maybeError = maybeError(cause);
-        if (maybeError.isPresent()) {
-            /*
-             * Here be dragons. We want to rethrow this so that it bubbles up to the uncaught exception handler. Yet, Netty wraps too many
-             * invocations of user-code in try/catch blocks that swallow all throwables. This means that a rethrow here will not bubble up
-             * to where we want it to. So, we fork a thread and throw the exception from there where Netty can not get to it. We do not wrap
-             * the exception so as to not lose the original cause during exit.
-             */
-            try {
-                // try to log the current stack trace
-                final StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
-                final String formatted = Arrays.stream(stackTrace).skip(1).map(e -> "\tat " + e).collect(Collectors.joining("\n"));
-                final Logger logger = ESLoggerFactory.getLogger(Netty4Utils.class);
-                logger.error("fatal error on the network layer\n{}", formatted);
-            } finally {
-                new Thread(
-                        () -> {
-                            throw maybeError.get();
-                        })
-                        .start();
-            }
+    public static void safeWriteAndFlush(Channel channel, Object message, ActionListener<Void> listener) {
+        // Use ImmediateEventExecutor.INSTANCE since we want to be able to complete this promise, and any waiting listeners, even if the
+        // channel's event loop has shut down. Normally this completion will happen on the channel's event loop anyway because the write op
+        // can only be completed by some network event from this point on. However...
+        final var promise = new DefaultChannelPromise(channel, ImmediateEventExecutor.INSTANCE);
+        addListener(promise, listener);
+        assert assertCorrectPromiseListenerThreading(promise);
+        channel.writeAndFlush(message, promise);
+        if (channel.eventLoop().isShuttingDown()) {
+            // ... if we get here then the event loop may already have terminated, and https://github.com/netty/netty/issues/8007 means that
+            // we cannot know if the preceding writeAndFlush made it onto its queue before shutdown or whether it will just vanish without a
+            // trace, so to avoid a leak we must double-check that the final listener is completed.
+            channel.eventLoop().terminationFuture().addListener(ignored ->
+            // NB the promise executor is ImmediateEventExecutor.INSTANCE which means this call to tryFailure() will ensure its completion,
+            // and the completion of any waiting listeners, without forking away from the current thread. The current thread might be the
+            // thread that was running the event loop since that's where the terminationFuture is completed, or it might be a thread which
+            // called (and is still calling) safeWriteAndFlush.
+            promise.tryFailure(new TransportException("Cannot send network message, event loop is shutting down.")));
         }
     }
 
-    static final int MAX_ITERATIONS = 1024;
+    private static boolean assertCorrectPromiseListenerThreading(ChannelPromise promise) {
+        addListener(promise, future -> {
+            var eventLoop = future.channel().eventLoop();
+            assert eventLoop.inEventLoop() || future.cause() instanceof RejectedExecutionException || eventLoop.isTerminated()
+                : future.cause();
+        });
+        return true;
+    }
 
     /**
-     * Unwrap the specified throwable looking for any suppressed errors or errors as a root cause of the specified throwable.
-     *
-     * @param cause the root throwable
-     *
-     * @return an optional error if one is found suppressed or a root cause in the tree rooted at the specified throwable
+     * Subscribes the given {@link ActionListener} to the given {@link Future}.
      */
-    static Optional<Error> maybeError(final Throwable cause) {
-        // early terminate if the cause is already an error
-        if (cause instanceof Error) {
-            return Optional.of((Error) cause);
-        }
-
-        final Queue<Throwable> queue = new LinkedList<>();
-        queue.add(cause);
-        int iterations = 0;
-        while (!queue.isEmpty()) {
-            iterations++;
-            if (iterations > MAX_ITERATIONS) {
-                ESLoggerFactory.getLogger(Netty4Utils.class).warn("giving up looking for fatal errors on the network layer", cause);
-                break;
+    public static void addListener(Future<Void> future, ActionListener<Void> listener) {
+        future.addListener(f -> {
+            if (f.isSuccess()) {
+                listener.onResponse(null);
+            } else {
+                final Throwable cause = f.cause();
+                ExceptionsHelper.maybeDieOnAnotherThread(cause);
+                if (cause instanceof Exception exception) {
+                    listener.onFailure(exception);
+                } else {
+                    listener.onFailure(new Exception(cause));
+                }
             }
-            final Throwable current = queue.remove();
-            if (current instanceof Error) {
-                return Optional.of((Error) current);
-            }
-            Collections.addAll(queue, current.getSuppressed());
-            if (current.getCause() != null) {
-                queue.add(current.getCause());
-            }
-        }
-        return Optional.empty();
+        });
     }
 
+    @SuppressForbidden(reason = "single point for adding listeners that enforces use of ChannelFutureListener")
+    public static void addListener(ChannelFuture channelFuture, ChannelFutureListener listener) {
+        channelFuture.addListener(listener);
+    }
 }

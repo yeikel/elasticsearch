@@ -1,13 +1,13 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
+ * Licensed to Elasticsearch B.V. under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
+ * ownership. Elasticsearch B.V. licenses this file to you under
  * the Apache License, Version 2.0 (the "License"); you may
  * not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -22,76 +22,134 @@ package org.elasticsearch.client;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+
 import org.apache.http.HttpHost;
-import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
 import org.elasticsearch.mocksocket.MockHttpServer;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.elasticsearch.client.RestClientTestUtil.getAllStatusCodes;
 import static org.elasticsearch.client.RestClientTestUtil.randomErrorNoRetryStatusCode;
 import static org.elasticsearch.client.RestClientTestUtil.randomOkStatusCode;
+import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * Integration test to check interaction between {@link RestClient} and {@link org.apache.http.client.HttpClient}.
  * Works against real http servers, multiple hosts. Also tests failover by randomly shutting down hosts.
  */
-//animal-sniffer doesn't like our usage of com.sun.net.httpserver.* classes
-@IgnoreJRERequirement
 public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
 
+    private static WaitForCancelHandler waitForCancelHandler;
     private static HttpServer[] httpServers;
-    private static RestClient restClient;
+    private static HttpHost[] httpHosts;
+    private static boolean stoppedFirstHost = false;
+    private static String pathPrefixWithoutLeadingSlash;
     private static String pathPrefix;
+    private static RestClient restClient;
 
     @BeforeClass
     public static void startHttpServer() throws Exception {
-        String pathPrefixWithoutLeadingSlash;
         if (randomBoolean()) {
-            pathPrefixWithoutLeadingSlash = "testPathPrefix/" + randomAsciiOfLengthBetween(1, 5);
+            pathPrefixWithoutLeadingSlash = "testPathPrefix/" + randomAsciiLettersOfLengthBetween(1, 5);
             pathPrefix = "/" + pathPrefixWithoutLeadingSlash;
         } else {
             pathPrefix = pathPrefixWithoutLeadingSlash = "";
         }
         int numHttpServers = randomIntBetween(2, 4);
         httpServers = new HttpServer[numHttpServers];
-        HttpHost[] httpHosts = new HttpHost[numHttpServers];
+        httpHosts = new HttpHost[numHttpServers];
+        waitForCancelHandler = new WaitForCancelHandler();
         for (int i = 0; i < numHttpServers; i++) {
             HttpServer httpServer = createHttpServer();
             httpServers[i] = httpServer;
             httpHosts[i] = new HttpHost(httpServer.getAddress().getHostString(), httpServer.getAddress().getPort());
         }
+        restClient = buildRestClient(NodeSelector.ANY);
+    }
+
+    private static RestClient buildRestClient(NodeSelector nodeSelector) {
+        return buildRestClient(nodeSelector, null);
+    }
+
+    private static RestClient buildRestClient(NodeSelector nodeSelector, RestClient.FailureListener failureListener) {
         RestClientBuilder restClientBuilder = RestClient.builder(httpHosts);
         if (pathPrefix.length() > 0) {
             restClientBuilder.setPathPrefix((randomBoolean() ? "/" : "") + pathPrefixWithoutLeadingSlash);
         }
-        restClient = restClientBuilder.build();
+        if (failureListener != null) {
+            restClientBuilder.setFailureListener(failureListener);
+        }
+        restClientBuilder.setNodeSelector(nodeSelector);
+        return restClientBuilder.build();
     }
 
     private static HttpServer createHttpServer() throws Exception {
         HttpServer httpServer = MockHttpServer.createHttp(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         httpServer.start();
-        //returns a different status code depending on the path
+        // returns a different status code depending on the path
         for (int statusCode : getAllStatusCodes()) {
             httpServer.createContext(pathPrefix + "/" + statusCode, new ResponseHandler(statusCode));
         }
+        httpServer.createContext(pathPrefix + "/20bytes", new ResponseHandlerWithContent());
+        httpServer.createContext(pathPrefix + "/wait", waitForCancelHandler);
         return httpServer;
     }
 
-    //animal-sniffer doesn't like our usage of com.sun.net.httpserver.* classes
-    @IgnoreJRERequirement
+    private static WaitForCancelHandler resetWaitHandlers() {
+        WaitForCancelHandler handler = new WaitForCancelHandler();
+        for (HttpServer httpServer : httpServers) {
+            httpServer.removeContext(pathPrefix + "/wait");
+            httpServer.createContext(pathPrefix + "/wait", handler);
+        }
+        return handler;
+    }
+
+    private static class WaitForCancelHandler implements HttpHandler {
+        private final CountDownLatch requestCameInLatch = new CountDownLatch(1);
+        private final CountDownLatch cancelHandlerLatch = new CountDownLatch(1);
+
+        void cancelDone() {
+            cancelHandlerLatch.countDown();
+        }
+
+        void awaitRequest() throws InterruptedException {
+            requestCameInLatch.await();
+        }
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            requestCameInLatch.countDown();
+            try {
+                cancelHandlerLatch.await();
+            } catch (InterruptedException ignore) {} finally {
+                exchange.sendResponseHeaders(200, 0);
+                exchange.close();
+            }
+        }
+    }
+
     private static class ResponseHandler implements HttpHandler {
         private final int statusCode;
 
@@ -103,6 +161,18 @@ public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
         public void handle(HttpExchange httpExchange) throws IOException {
             httpExchange.getRequestBody().close();
             httpExchange.sendResponseHeaders(statusCode, -1);
+            httpExchange.close();
+        }
+    }
+
+    private static class ResponseHandlerWithContent implements HttpHandler {
+        @Override
+        public void handle(HttpExchange httpExchange) throws IOException {
+            byte[] body = "01234567890123456789".getBytes(StandardCharsets.UTF_8);
+            httpExchange.sendResponseHeaders(200, body.length);
+            try (OutputStream out = httpExchange.getResponseBody()) {
+                out.write(body);
+            }
             httpExchange.close();
         }
     }
@@ -119,10 +189,13 @@ public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
 
     @Before
     public void stopRandomHost() {
-        //verify that shutting down some hosts doesn't matter as long as one working host is left behind
+        // verify that shutting down some hosts doesn't matter as long as one working host is left behind
         if (httpServers.length > 1 && randomBoolean()) {
             List<HttpServer> updatedHttpServers = new ArrayList<>(httpServers.length - 1);
-            int nodeIndex = randomInt(httpServers.length - 1);
+            int nodeIndex = randomIntBetween(0, httpServers.length - 1);
+            if (0 == nodeIndex) {
+                stoppedFirstHost = true;
+            }
             for (int i = 0; i < httpServers.length; i++) {
                 HttpServer httpServer = httpServers[i];
                 if (i == nodeIndex) {
@@ -131,7 +204,7 @@ public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
                     updatedHttpServers.add(httpServer);
                 }
             }
-            httpServers = updatedHttpServers.toArray(new HttpServer[updatedHttpServers.size()]);
+            httpServers = updatedHttpServers.toArray(new HttpServer[0]);
         }
     }
 
@@ -139,12 +212,12 @@ public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
         int numRequests = randomIntBetween(5, 20);
         for (int i = 0; i < numRequests; i++) {
             final String method = RestClientTestUtil.randomHttpMethod(getRandom());
-            //we don't test status codes that are subject to retries as they interfere with hosts being stopped
+            // we don't test status codes that are subject to retries as they interfere with hosts being stopped
             final int statusCode = randomBoolean() ? randomOkStatusCode(getRandom()) : randomErrorNoRetryStatusCode(getRandom());
             Response response;
             try {
-                response = restClient.performRequest(method, "/" + statusCode);
-            } catch(ResponseException responseException) {
+                response = restClient.performRequest(new Request(method, "/" + statusCode));
+            } catch (ResponseException responseException) {
                 response = responseException.getResponse();
             }
             assertEquals(method, response.getRequestLine().getMethod());
@@ -159,9 +232,9 @@ public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
         final List<TestResponse> responses = new CopyOnWriteArrayList<>();
         for (int i = 0; i < numRequests; i++) {
             final String method = RestClientTestUtil.randomHttpMethod(getRandom());
-            //we don't test status codes that are subject to retries as they interfere with hosts being stopped
+            // we don't test status codes that are subject to retries as they interfere with hosts being stopped
             final int statusCode = randomBoolean() ? randomOkStatusCode(getRandom()) : randomErrorNoRetryStatusCode(getRandom());
-            restClient.performRequestAsync(method, "/" + statusCode, new ResponseListener() {
+            restClient.performRequestAsync(new Request(method, "/" + statusCode), new ResponseListener() {
                 @Override
                 public void onSuccess(Response response) {
                     responses.add(new TestResponse(method, statusCode, response));
@@ -182,9 +255,104 @@ public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
             Response response = testResponse.getResponse();
             assertEquals(testResponse.method, response.getRequestLine().getMethod());
             assertEquals(testResponse.statusCode, response.getStatusLine().getStatusCode());
-            assertEquals((pathPrefix.length() > 0 ? pathPrefix : "") + "/" + testResponse.statusCode,
-                    response.getRequestLine().getUri());
+            assertEquals((pathPrefix.length() > 0 ? pathPrefix : "") + "/" + testResponse.statusCode, response.getRequestLine().getUri());
         }
+    }
+
+    public void testCancelAsyncRequests() throws Exception {
+        int numRequests = randomIntBetween(5, 20);
+        final List<Response> responses = new CopyOnWriteArrayList<>();
+        final List<Exception> exceptions = new CopyOnWriteArrayList<>();
+        for (int i = 0; i < numRequests; i++) {
+            CountDownLatch latch = new CountDownLatch(1);
+            waitForCancelHandler = resetWaitHandlers();
+            Cancellable cancellable = restClient.performRequestAsync(new Request("GET", "/wait"), new ResponseListener() {
+                @Override
+                public void onSuccess(Response response) {
+                    responses.add(response);
+                    latch.countDown();
+                }
+
+                @Override
+                public void onFailure(Exception exception) {
+                    exceptions.add(exception);
+                    latch.countDown();
+                }
+            });
+            if (randomBoolean()) {
+                // we wait for the request to get to the server-side otherwise we almost always cancel
+                // the request artificially on the client-side before even sending it
+                waitForCancelHandler.awaitRequest();
+            }
+            cancellable.cancel();
+            waitForCancelHandler.cancelDone();
+            assertTrue(latch.await(5, TimeUnit.SECONDS));
+        }
+        assertEquals(0, responses.size());
+        assertEquals(numRequests, exceptions.size());
+        for (Exception exception : exceptions) {
+            assertThat(exception, instanceOf(CancellationException.class));
+        }
+    }
+
+    /**
+     * Test host selector against a real server <strong>and</strong>
+     * test what happens after calling
+     */
+    public void testNodeSelector() throws Exception {
+        try (RestClient restClient = buildRestClient(firstPositionNodeSelector())) {
+            Request request = new Request("GET", "/200");
+            int rounds = between(1, 10);
+            for (int i = 0; i < rounds; i++) {
+                /*
+                 * Run the request more than once to verify that the
+                 * NodeSelector overrides the round robin behavior.
+                 */
+                if (stoppedFirstHost) {
+                    try {
+                        RestClientSingleHostTests.performRequestSyncOrAsync(restClient, request);
+                        fail("expected to fail to connect");
+                    } catch (ConnectException e) {
+                        // Windows isn't consistent here. Sometimes the message is even null!
+                        if (false == System.getProperty("os.name").startsWith("Windows")) {
+                            assertThat(e.getMessage(), startsWith("Connection refused"));
+                        }
+                    }
+                } else {
+                    Response response = RestClientSingleHostTests.performRequestSyncOrAsync(restClient, request);
+                    assertEquals(httpHosts[0], response.getHost());
+                }
+            }
+        }
+    }
+
+    @Ignore("https://github.com/elastic/elasticsearch/issues/87314")
+    public void testNonRetryableException() throws Exception {
+        RequestOptions.Builder options = RequestOptions.DEFAULT.toBuilder();
+        options.setHttpAsyncResponseConsumerFactory(
+            // Limit to very short responses to trigger a ContentTooLongException
+            () -> new HeapBufferedAsyncResponseConsumer(10)
+        );
+
+        AtomicInteger failureCount = new AtomicInteger();
+        RestClient client = buildRestClient(NodeSelector.ANY, new RestClient.FailureListener() {
+            @Override
+            public void onFailure(Node node) {
+                failureCount.incrementAndGet();
+            }
+        });
+
+        failureCount.set(0);
+        Request request = new Request("POST", "/20bytes");
+        request.setOptions(options);
+        try {
+            RestClientSingleHostTests.performRequestSyncOrAsync(client, request);
+            fail("Request should not succeed");
+        } catch (IOException e) {
+            assertEquals(stoppedFirstHost ? 2 : 1, failureCount.intValue());
+        }
+
+        client.close();
     }
 
     private static class TestResponse {
@@ -207,5 +375,15 @@ public class RestClientMultipleHostsIntegTests extends RestClientTestCase {
             }
             throw new AssertionError("unexpected response " + response.getClass());
         }
+    }
+
+    private NodeSelector firstPositionNodeSelector() {
+        return nodes -> {
+            for (Iterator<Node> itr = nodes.iterator(); itr.hasNext();) {
+                if (httpHosts[0] != itr.next().getHost()) {
+                    itr.remove();
+                }
+            }
+        };
     }
 }

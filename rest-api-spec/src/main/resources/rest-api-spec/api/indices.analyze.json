@@ -1,35 +1,52 @@
 {
   "indices.analyze": {
-    "documentation": "http://www.elastic.co/guide/en/elasticsearch/reference/master/indices-analyze.html",
-    "methods": ["GET", "POST"],
+    "documentation": {
+      "url": "https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-analyze",
+      "description": "Get tokens from text analysis"
+    },
+    "stability": "stable",
+    "visibility": "public",
+    "headers": {
+      "accept": [
+        "application/json"
+      ],
+      "content_type": [
+        "application/json"
+      ]
+    },
     "url": {
-      "path": "/_analyze",
-      "paths": ["/_analyze", "/{index}/_analyze"],
-      "parts": {
-        "index": {
-          "type" : "string",
-          "description" : "The name of the index to scope the operation"
-        }
-      },
-      "params": {
-        "index": {
-          "type" : "string",
-          "description" : "The name of the index to scope the operation"
+      "paths": [
+        {
+          "path": "/_analyze",
+          "methods": [
+            "GET",
+            "POST"
+          ]
         },
-        "prefer_local": {
-          "type" : "boolean",
-          "description" : "With `true`, specify that a local shard should be used if available, with `false`, use a random shard (default: true)"
-        },
-        "format": {
-          "type": "enum",
-          "options" : ["detailed","text"],
-          "default": "detailed",
-          "description": "Format of the output"
+        {
+          "path": "/{index}/_analyze",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "string",
+              "description": "The name of the index to scope the operation"
+            }
+          }
         }
+      ]
+    },
+    "params": {
+      "index": {
+        "type": "string",
+        "description": "The name of the index to scope the operation"
       }
     },
     "body": {
-      "description" : "Define analyzer/tokenizer parameters and the text on which the analysis should be performed"
+      "description": "Define analyzer/tokenizer parameters and the text on which the analysis should be performed",
+      "required": true
     }
   }
 }

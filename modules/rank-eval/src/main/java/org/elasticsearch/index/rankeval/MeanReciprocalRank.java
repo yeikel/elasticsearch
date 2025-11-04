@@ -1,39 +1,30 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.index.rankeval;
 
-import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.xcontent.ConstructingObjectParser;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.xcontent.ConstructingObjectParser;
+import org.elasticsearch.xcontent.ParseField;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
+import java.util.OptionalInt;
 
-import static org.elasticsearch.common.xcontent.ConstructingObjectParser.optionalConstructorArg;
 import static org.elasticsearch.index.rankeval.EvaluationMetric.joinHitsWithRatings;
+import static org.elasticsearch.xcontent.ConstructingObjectParser.constructorArg;
+import static org.elasticsearch.xcontent.ConstructingObjectParser.optionalConstructorArg;
 
 /**
  * Metric implementing Mean Reciprocal Rank (https://en.wikipedia.org/wiki/Mean_reciprocal_rank).<br>
@@ -89,8 +80,8 @@ public class MeanReciprocalRank implements EvaluationMetric {
     }
 
     @Override
-    public Optional<Integer> forcedSearchSize() {
-        return Optional.of(k);
+    public OptionalInt forcedSearchSize() {
+        return OptionalInt.of(k);
     }
 
     @Override
@@ -109,15 +100,14 @@ public class MeanReciprocalRank implements EvaluationMetric {
      * Compute ReciprocalRank based on provided relevant document IDs.
      **/
     @Override
-    public EvalQueryQuality evaluate(String taskId, SearchHit[] hits,
-            List<RatedDocument> ratedDocs) {
+    public EvalQueryQuality evaluate(String taskId, SearchHit[] hits, List<RatedDocument> ratedDocs) {
         List<RatedSearchHit> ratedHits = joinHitsWithRatings(hits, ratedDocs);
         int firstRelevant = -1;
         int rank = 1;
         for (RatedSearchHit hit : ratedHits) {
-            Optional<Integer> rating = hit.getRating();
+            OptionalInt rating = hit.getRating();
             if (rating.isPresent()) {
-                if (rating.get() >= this.relevantRatingThreshhold) {
+                if (rating.getAsInt() >= this.relevantRatingThreshhold) {
                     firstRelevant = rank;
                     break;
                 }
@@ -127,20 +117,24 @@ public class MeanReciprocalRank implements EvaluationMetric {
 
         double reciprocalRank = (firstRelevant == -1) ? 0 : 1.0d / firstRelevant;
         EvalQueryQuality evalQueryQuality = new EvalQueryQuality(taskId, reciprocalRank);
-        evalQueryQuality.setMetricDetails(new Breakdown(firstRelevant));
+        evalQueryQuality.setMetricDetails(new Detail(firstRelevant));
         evalQueryQuality.addHitsAndRatings(ratedHits);
         return evalQueryQuality;
     }
 
     private static final ParseField RELEVANT_RATING_FIELD = new ParseField("relevant_rating_threshold");
     private static final ParseField K_FIELD = new ParseField("k");
-    private static final ConstructingObjectParser<MeanReciprocalRank, Void> PARSER = new ConstructingObjectParser<>("reciprocal_rank",
-            args -> {
-                Integer optionalThreshold = (Integer) args[0];
-                Integer optionalK = (Integer) args[1];
-                return new MeanReciprocalRank(optionalThreshold == null ? DEFAULT_RATING_THRESHOLD : optionalThreshold,
-                        optionalK == null ? DEFAULT_K : optionalK);
-            });
+    private static final ConstructingObjectParser<MeanReciprocalRank, Void> PARSER = new ConstructingObjectParser<>(
+        "reciprocal_rank",
+        args -> {
+            Integer optionalThreshold = (Integer) args[0];
+            Integer optionalK = (Integer) args[1];
+            return new MeanReciprocalRank(
+                optionalThreshold == null ? DEFAULT_RATING_THRESHOLD : optionalThreshold,
+                optionalK == null ? DEFAULT_K : optionalK
+            );
+        }
+    );
 
     static {
         PARSER.declareInt(optionalConstructorArg(), RELEVANT_RATING_FIELD);
@@ -171,8 +165,7 @@ public class MeanReciprocalRank implements EvaluationMetric {
             return false;
         }
         MeanReciprocalRank other = (MeanReciprocalRank) obj;
-        return Objects.equals(relevantRatingThreshhold, other.relevantRatingThreshhold)
-                && Objects.equals(k, other.k);
+        return Objects.equals(relevantRatingThreshhold, other.relevantRatingThreshhold) && Objects.equals(k, other.k);
     }
 
     @Override
@@ -180,23 +173,39 @@ public class MeanReciprocalRank implements EvaluationMetric {
         return Objects.hash(relevantRatingThreshhold, k);
     }
 
-    static class Breakdown implements MetricDetails {
+    public static final class Detail implements MetricDetail {
 
         private final int firstRelevantRank;
+        private static ParseField FIRST_RELEVANT_RANK_FIELD = new ParseField("first_relevant");
 
-        Breakdown(int firstRelevantRank) {
+        Detail(int firstRelevantRank) {
             this.firstRelevantRank = firstRelevantRank;
         }
 
-        Breakdown(StreamInput in) throws IOException {
+        Detail(StreamInput in) throws IOException {
             this.firstRelevantRank = in.readVInt();
         }
 
         @Override
-        public XContentBuilder toXContent(XContentBuilder builder, Params params)
-                throws IOException {
-            builder.field("first_relevant", firstRelevantRank);
-            return builder;
+        public String getMetricName() {
+            return NAME;
+        }
+
+        @Override
+        public XContentBuilder innerToXContent(XContentBuilder builder, Params params) throws IOException {
+            return builder.field(FIRST_RELEVANT_RANK_FIELD.getPreferredName(), firstRelevantRank);
+        }
+
+        private static final ConstructingObjectParser<Detail, Void> PARSER = new ConstructingObjectParser<>(NAME, true, args -> {
+            return new Detail((Integer) args[0]);
+        });
+
+        static {
+            PARSER.declareInt(constructorArg(), FIRST_RELEVANT_RANK_FIELD);
+        }
+
+        public static Detail fromXContent(XContentParser parser) {
+            return PARSER.apply(parser, null);
         }
 
         @Override
@@ -209,24 +218,28 @@ public class MeanReciprocalRank implements EvaluationMetric {
             return NAME;
         }
 
-        int getFirstRelevantRank() {
+        /**
+         * the ranking of the first relevant document, or -1 if no relevant document was
+         * found
+         */
+        public int getFirstRelevantRank() {
             return firstRelevantRank;
         }
 
         @Override
-        public final boolean equals(Object obj) {
+        public boolean equals(Object obj) {
             if (this == obj) {
                 return true;
             }
             if (obj == null || getClass() != obj.getClass()) {
                 return false;
             }
-            MeanReciprocalRank.Breakdown other = (MeanReciprocalRank.Breakdown) obj;
+            MeanReciprocalRank.Detail other = (MeanReciprocalRank.Detail) obj;
             return Objects.equals(firstRelevantRank, other.firstRelevantRank);
         }
 
         @Override
-        public final int hashCode() {
+        public int hashCode() {
             return Objects.hash(firstRelevantRank);
         }
     }

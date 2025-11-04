@@ -1,42 +1,37 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.ingest.common;
 
+import org.elasticsearch.cluster.metadata.ProjectId;
 import org.elasticsearch.ingest.AbstractProcessor;
 import org.elasticsearch.ingest.ConfigurationUtils;
 import org.elasticsearch.ingest.IngestDocument;
 import org.elasticsearch.ingest.Processor;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
- * Base class for processors that manipulate strings and require a single "fields" array config value, which
+ * Base class for processors that manipulate source strings and require a single "fields" array config value, which
  * holds a list of field names in string format.
+ *
+ * @param <T> The resultant type for the target field
  */
-abstract class AbstractStringProcessor extends AbstractProcessor {
+abstract class AbstractStringProcessor<T> extends AbstractProcessor {
     private final String field;
     private final boolean ignoreMissing;
     private final String targetField;
 
-    AbstractStringProcessor(String tag, String field, boolean ignoreMissing, String targetField) {
-        super(tag);
+    AbstractStringProcessor(String tag, String description, boolean ignoreMissing, String targetField, String field) {
+        super(tag, description);
         this.field = field;
         this.ignoreMissing = ignoreMissing;
         this.targetField = targetField;
@@ -55,19 +50,52 @@ abstract class AbstractStringProcessor extends AbstractProcessor {
     }
 
     @Override
-    public final void execute(IngestDocument document) {
-        String val = document.getFieldValue(field, String.class, ignoreMissing);
+    public final IngestDocument execute(IngestDocument document) {
+        Object val = document.getFieldValue(field, Object.class, ignoreMissing);
+        Object newValue;
 
         if (val == null && ignoreMissing) {
-            return;
+            return document;
         } else if (val == null) {
             throw new IllegalArgumentException("field [" + field + "] is null, cannot process it.");
         }
 
-        document.setFieldValue(targetField, process(val));
+        if (val instanceof List<?> list) {
+            List<Object> newList = new ArrayList<>(list.size());
+            for (Object value : list) {
+                if (value instanceof String string) {
+                    newList.add(process(string));
+                } else {
+                    throw new IllegalArgumentException(
+                        "value ["
+                            + value
+                            + "] of type ["
+                            + value.getClass().getName()
+                            + "] in list field ["
+                            + field
+                            + "] cannot be cast to ["
+                            + String.class.getName()
+                            + "]"
+                    );
+                }
+            }
+            newValue = newList;
+        } else {
+            if (val instanceof String string) {
+                newValue = process(string);
+            } else {
+                throw new IllegalArgumentException(
+                    "field [" + field + "] of type [" + val.getClass().getName() + "] cannot be cast to [" + String.class.getName() + "]"
+                );
+            }
+
+        }
+
+        document.setFieldValue(targetField, newValue);
+        return document;
     }
 
-    protected abstract String process(String value);
+    protected abstract T process(String value);
 
     abstract static class Factory implements Processor.Factory {
         final String processorType;
@@ -77,16 +105,27 @@ abstract class AbstractStringProcessor extends AbstractProcessor {
         }
 
         @Override
-        public AbstractStringProcessor create(Map<String, Processor.Factory> registry, String tag,
-                                              Map<String, Object> config) throws Exception {
+        public AbstractStringProcessor<?> create(
+            Map<String, Processor.Factory> registry,
+            String tag,
+            String description,
+            Map<String, Object> config,
+            ProjectId projectId
+        ) throws Exception {
             String field = ConfigurationUtils.readStringProperty(processorType, tag, config, "field");
             boolean ignoreMissing = ConfigurationUtils.readBooleanProperty(processorType, tag, config, "ignore_missing", false);
             String targetField = ConfigurationUtils.readStringProperty(processorType, tag, config, "target_field", field);
 
-            return newProcessor(tag, config, field, ignoreMissing, targetField);
+            return newProcessor(tag, description, config, field, ignoreMissing, targetField);
         }
 
-        protected abstract AbstractStringProcessor newProcessor(String processorTag, Map<String, Object> config, String field,
-                                                                boolean ignoreMissing, String targetField);
+        protected abstract AbstractStringProcessor<?> newProcessor(
+            String processorTag,
+            String description,
+            Map<String, Object> config,
+            String field,
+            boolean ignoreMissing,
+            String targetField
+        );
     }
 }

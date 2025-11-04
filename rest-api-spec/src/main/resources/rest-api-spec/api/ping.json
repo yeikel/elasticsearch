@@ -1,15 +1,25 @@
 {
   "ping": {
-    "documentation": "http://www.elastic.co/guide/",
-    "methods": ["HEAD"],
-    "url": {
-      "path": "/",
-      "paths": ["/"],
-      "parts": {
-      },
-      "params": {
-      }
+    "documentation": {
+      "url": "https://www.elastic.co/docs/api/doc/elasticsearch/group/endpoint-cluster",
+      "description": "Ping the cluster"
     },
-    "body": null
+    "stability": "stable",
+    "visibility": "public",
+    "headers": {
+      "accept": [
+        "application/json"
+      ]
+    },
+    "url": {
+      "paths": [
+        {
+          "path": "/",
+          "methods": [
+            "HEAD"
+          ]
+        }
+      ]
+    }
   }
 }

@@ -1,12 +1,25 @@
 {
   "cluster.remote_info": {
-    "documentation": "http://www.elastic.co/guide/en/elasticsearch/reference/master/cluster-remote-info.html",
-    "methods": ["GET"],
-    "url": {
-      "path": "/_remote/info",
-      "paths": ["/_remote/info"],
-      "params": {}
+    "documentation": {
+      "url": "https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-cluster-remote-info",
+      "description": "Get remote cluster information"
     },
-    "body": null
+    "stability": "stable",
+    "visibility": "public",
+    "headers": {
+      "accept": [
+        "application/json"
+      ]
+    },
+    "url": {
+      "paths": [
+        {
+          "path": "/_remote/info",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    }
   }
 }

@@ -1,15 +1,25 @@
 {
   "ingest.processor_grok": {
-    "documentation": "https://www.elastic.co/guide/en/elasticsearch/plugins/master/ingest.html",
-    "methods": [ "GET" ],
-    "url": {
-      "path": "/_ingest/processor/grok",
-      "paths": ["/_ingest/processor/grok"],
-      "parts": {
-      },
-      "params": {
-      }
+    "documentation": {
+      "url": "https://www.elastic.co/docs/reference/enrich-processor/grok-processor",
+      "description": "Run a grok processor"
     },
-    "body": null
+    "stability": "stable",
+    "visibility": "public",
+    "headers": {
+      "accept": [
+        "application/json"
+      ]
+    },
+    "url": {
+      "paths": [
+        {
+          "path": "/_ingest/processor/grok",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    }
   }
 }

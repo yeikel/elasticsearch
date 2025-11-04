@@ -1,130 +1,216 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.http.netty4;
 
-import io.netty.channel.Channel;
-import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpUtil;
+import io.netty.handler.codec.http.QueryStringDecoder;
+import io.netty.handler.codec.http.cookie.Cookie;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
+import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 
-import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.http.HttpBody;
+import org.elasticsearch.http.HttpRequest;
+import org.elasticsearch.http.HttpResponse;
+import org.elasticsearch.rest.ChunkedRestResponseBodyPart;
 import org.elasticsearch.rest.RestRequest;
-import org.elasticsearch.transport.netty4.Netty4Utils;
+import org.elasticsearch.rest.RestStatus;
 
-import java.net.SocketAddress;
 import java.util.AbstractMap;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
-public class Netty4HttpRequest extends RestRequest {
+public class Netty4HttpRequest implements HttpRequest {
 
-    private final FullHttpRequest request;
-    private final Channel channel;
-    private final BytesReference content;
+    private final int sequence;
+    private final io.netty.handler.codec.http.HttpRequest nettyRequest;
+    private boolean hasContent;
+    private HttpBody content;
+    private final Map<String, List<String>> headers;
+    private final AtomicBoolean released;
+    private final Exception inboundException;
+    private final QueryStringDecoder queryStringDecoder;
 
-    Netty4HttpRequest(NamedXContentRegistry xContentRegistry, FullHttpRequest request, Channel channel) {
-        super(xContentRegistry, request.uri(), new HttpHeadersMap(request.headers()));
-        this.request = request;
-        this.channel = channel;
-        if (request.content().isReadable()) {
-            this.content = Netty4Utils.toBytesReference(request.content());
-        } else {
-            this.content = BytesArray.EMPTY;
-        }
+    public Netty4HttpRequest(int sequence, io.netty.handler.codec.http.HttpRequest nettyRequest, Exception exception) {
+        this(sequence, nettyRequest, HttpBody.empty(), new AtomicBoolean(false), exception);
     }
 
-    public FullHttpRequest request() {
-        return this.request;
+    public Netty4HttpRequest(int sequence, io.netty.handler.codec.http.HttpRequest nettyRequest, HttpBody content) {
+        this(sequence, nettyRequest, content, new AtomicBoolean(false), null);
     }
 
-    @Override
-    public Method method() {
-        HttpMethod httpMethod = request.method();
-        if (httpMethod == HttpMethod.GET)
-            return Method.GET;
-
-        if (httpMethod == HttpMethod.POST)
-            return Method.POST;
-
-        if (httpMethod == HttpMethod.PUT)
-            return Method.PUT;
-
-        if (httpMethod == HttpMethod.DELETE)
-            return Method.DELETE;
-
-        if (httpMethod == HttpMethod.HEAD) {
-            return Method.HEAD;
-        }
-
-        if (httpMethod == HttpMethod.OPTIONS) {
-            return Method.OPTIONS;
-        }
-
-        return Method.GET;
+    private Netty4HttpRequest(
+        int sequence,
+        io.netty.handler.codec.http.HttpRequest nettyRequest,
+        HttpBody content,
+        AtomicBoolean released,
+        Exception inboundException
+    ) {
+        this.sequence = sequence;
+        this.nettyRequest = nettyRequest;
+        this.hasContent = hasContentHeader(nettyRequest);
+        this.content = content;
+        this.headers = getHttpHeadersAsMap(nettyRequest.headers());
+        this.released = released;
+        this.inboundException = inboundException;
+        this.queryStringDecoder = new QueryStringDecoder(nettyRequest.uri());
     }
 
-    @Override
-    public String uri() {
-        return request.uri();
+    private static boolean hasContentHeader(io.netty.handler.codec.http.HttpRequest nettyRequest) {
+        return HttpUtil.isTransferEncodingChunked(nettyRequest) || HttpUtil.getContentLength(nettyRequest, 0L) > 0;
     }
 
     @Override
     public boolean hasContent() {
-        return content.length() > 0;
+        return hasContent;
     }
 
     @Override
-    public BytesReference content() {
+    public RestRequest.Method method() {
+        return translateRequestMethod(nettyRequest.method());
+    }
+
+    @Override
+    public String uri() {
+        return nettyRequest.uri();
+    }
+
+    @Override
+    public String rawPath() {
+        return queryStringDecoder.rawPath();
+    }
+
+    @Override
+    public HttpBody body() {
+        assert released.get() == false;
         return content;
     }
 
-    /**
-     * Returns the remote address where this rest request channel is "connected to".  The
-     * returned {@link SocketAddress} is supposed to be down-cast into more
-     * concrete type such as {@link java.net.InetSocketAddress} to retrieve
-     * the detailed information.
-     */
     @Override
-    public SocketAddress getRemoteAddress() {
-        return channel.remoteAddress();
+    public void setBody(HttpBody body) {
+        assert this.content.isStream() : "only stream content can be replaced";
+        assert body.isFull() : "only full content can replace stream";
+        this.content = body;
+        this.hasContent = body.isEmpty() == false;
     }
 
-    /**
-     * Returns the local address where this request channel is bound to.  The returned
-     * {@link SocketAddress} is supposed to be down-cast into more concrete
-     * type such as {@link java.net.InetSocketAddress} to retrieve the detailed
-     * information.
-     */
     @Override
-    public SocketAddress getLocalAddress() {
-        return channel.localAddress();
+    public void release() {
+        if (released.compareAndSet(false, true)) {
+            content.close();
+        }
     }
 
-    public Channel getChannel() {
-        return channel;
+    @Override
+    public final Map<String, List<String>> getHeaders() {
+        return headers;
+    }
+
+    @Override
+    public List<String> strictCookies() {
+        String cookieString = nettyRequest.headers().get(HttpHeaderNames.COOKIE);
+        if (cookieString != null) {
+            Set<Cookie> cookies = ServerCookieDecoder.STRICT.decode(cookieString);
+            if (cookies.isEmpty() == false) {
+                return ServerCookieEncoder.STRICT.encode(cookies);
+            }
+        }
+        return Collections.emptyList();
+    }
+
+    @Override
+    public HttpVersion protocolVersion() {
+        if (nettyRequest.protocolVersion().equals(io.netty.handler.codec.http.HttpVersion.HTTP_1_0)) {
+            return HttpVersion.HTTP_1_0;
+        } else if (nettyRequest.protocolVersion().equals(io.netty.handler.codec.http.HttpVersion.HTTP_1_1)) {
+            return HttpVersion.HTTP_1_1;
+        } else {
+            throw new IllegalArgumentException("Unexpected http protocol version: " + nettyRequest.protocolVersion());
+        }
+    }
+
+    @Override
+    public HttpRequest removeHeader(String header) {
+        HttpHeaders copiedHeadersWithout = nettyRequest.headers().copy();
+        copiedHeadersWithout.remove(header);
+        var requestWithoutHeader = new DefaultHttpRequest(
+            nettyRequest.protocolVersion(),
+            nettyRequest.method(),
+            nettyRequest.uri(),
+            copiedHeadersWithout
+        );
+        return new Netty4HttpRequest(sequence, requestWithoutHeader, content, released, null);
+    }
+
+    @Override
+    public Netty4FullHttpResponse createResponse(RestStatus status, BytesReference contentRef) {
+        return new Netty4FullHttpResponse(sequence, nettyRequest.protocolVersion(), status, contentRef);
+    }
+
+    @Override
+    public HttpResponse createResponse(RestStatus status, ChunkedRestResponseBodyPart firstBodyPart) {
+        return new Netty4ChunkedHttpResponse(sequence, nettyRequest.protocolVersion(), status, firstBodyPart);
+    }
+
+    @Override
+    public Exception getInboundException() {
+        return inboundException;
+    }
+
+    public io.netty.handler.codec.http.HttpRequest getNettyRequest() {
+        return nettyRequest;
+    }
+
+    public static RestRequest.Method translateRequestMethod(HttpMethod httpMethod) {
+        if (httpMethod == HttpMethod.GET) return RestRequest.Method.GET;
+
+        if (httpMethod == HttpMethod.POST) return RestRequest.Method.POST;
+
+        if (httpMethod == HttpMethod.PUT) return RestRequest.Method.PUT;
+
+        if (httpMethod == HttpMethod.DELETE) return RestRequest.Method.DELETE;
+
+        if (httpMethod == HttpMethod.HEAD) {
+            return RestRequest.Method.HEAD;
+        }
+
+        if (httpMethod == HttpMethod.OPTIONS) {
+            return RestRequest.Method.OPTIONS;
+        }
+
+        if (httpMethod == HttpMethod.PATCH) {
+            return RestRequest.Method.PATCH;
+        }
+
+        if (httpMethod == HttpMethod.TRACE) {
+            return RestRequest.Method.TRACE;
+        }
+
+        if (httpMethod == HttpMethod.CONNECT) {
+            return RestRequest.Method.CONNECT;
+        }
+
+        throw new IllegalArgumentException("Unexpected http method: " + httpMethod);
+    }
+
+    public static Map<String, List<String>> getHttpHeadersAsMap(HttpHeaders httpHeaders) {
+        return new HttpHeadersMap(httpHeaders);
     }
 
     /**
@@ -195,13 +281,15 @@ public class Netty4HttpRequest extends RestRequest {
 
         @Override
         public Collection<List<String>> values() {
-            return httpHeaders.names().stream().map(k -> Collections.unmodifiableList(httpHeaders.getAll(k))).collect(Collectors.toList());
+            return httpHeaders.names().stream().map(k -> Collections.unmodifiableList(httpHeaders.getAll(k))).toList();
         }
 
         @Override
         public Set<Entry<String, List<String>>> entrySet() {
-            return httpHeaders.names().stream().map(k -> new AbstractMap.SimpleImmutableEntry<>(k, httpHeaders.getAll(k)))
-                    .collect(Collectors.toSet());
+            return httpHeaders.names()
+                .stream()
+                .map(k -> new AbstractMap.SimpleImmutableEntry<>(k, httpHeaders.getAll(k)))
+                .collect(Collectors.toSet());
         }
     }
 }

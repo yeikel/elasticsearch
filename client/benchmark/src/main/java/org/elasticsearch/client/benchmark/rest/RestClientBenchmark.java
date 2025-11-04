@@ -1,44 +1,26 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 package org.elasticsearch.client.benchmark.rest;
 
-import org.apache.http.HttpEntity;
 import org.apache.http.HttpHeaders;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpStatus;
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.conn.ConnectionKeepAliveStrategy;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
 import org.apache.http.message.BasicHeader;
-import org.apache.http.nio.entity.NStringEntity;
 import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
-import org.elasticsearch.client.RestClientBuilder;
 import org.elasticsearch.client.benchmark.AbstractBenchmark;
 import org.elasticsearch.client.benchmark.ops.bulk.BulkRequestExecutor;
 import org.elasticsearch.client.benchmark.ops.search.SearchRequestExecutor;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -51,10 +33,10 @@ public final class RestClientBenchmark extends AbstractBenchmark<RestClient> {
 
     @Override
     protected RestClient client(String benchmarkTargetHost) {
-        return RestClient
-            .builder(new HttpHost(benchmarkTargetHost, 9200))
-            .setHttpClientConfigCallback(b -> b.setDefaultHeaders(
-                Collections.singleton(new BasicHeader(HttpHeaders.ACCEPT_ENCODING, "gzip"))))
+        return RestClient.builder(new HttpHost(benchmarkTargetHost, 9200))
+            .setHttpClientConfigCallback(
+                b -> b.setDefaultHeaders(Collections.singleton(new BasicHeader(HttpHeaders.ACCEPT_ENCODING, "gzip")))
+            )
             .setRequestConfigCallback(b -> b.setContentCompressionEnabled(true))
             .build();
     }
@@ -71,24 +53,25 @@ public final class RestClientBenchmark extends AbstractBenchmark<RestClient> {
 
     private static final class RestBulkRequestExecutor implements BulkRequestExecutor {
         private final RestClient client;
-        private final String actionMetaData;
+        private final String actionMetadata;
 
         RestBulkRequestExecutor(RestClient client, String index, String type) {
             this.client = client;
-            this.actionMetaData = String.format(Locale.ROOT, "{ \"index\" : { \"_index\" : \"%s\", \"_type\" : \"%s\" } }%n", index, type);
+            this.actionMetadata = String.format(Locale.ROOT, "{ \"index\" : { \"_index\" : \"%s\", \"_type\" : \"%s\" } }%n", index, type);
         }
 
         @Override
         public boolean bulkIndex(List<String> bulkData) {
             StringBuilder bulkRequestBody = new StringBuilder();
             for (String bulkItem : bulkData) {
-                bulkRequestBody.append(actionMetaData);
+                bulkRequestBody.append(actionMetadata);
                 bulkRequestBody.append(bulkItem);
                 bulkRequestBody.append("\n");
             }
-            HttpEntity entity = new NStringEntity(bulkRequestBody.toString(), ContentType.APPLICATION_JSON);
+            Request request = new Request("POST", "/geonames/type/_noop_bulk");
+            request.setJsonEntity(bulkRequestBody.toString());
             try {
-                Response response = client.performRequest("POST", "/geonames/type/_noop_bulk", Collections.emptyMap(), entity);
+                Response response = client.performRequest(request);
                 return response.getStatusLine().getStatusCode() == HttpStatus.SC_OK;
             } catch (Exception e) {
                 throw new ElasticsearchException(e);
@@ -107,9 +90,10 @@ public final class RestClientBenchmark extends AbstractBenchmark<RestClient> {
 
         @Override
         public boolean search(String source) {
-            HttpEntity searchBody = new NStringEntity(source, StandardCharsets.UTF_8);
+            Request request = new Request("GET", endpoint);
+            request.setJsonEntity(source);
             try {
-                Response response = client.performRequest("GET", endpoint, Collections.emptyMap(), searchBody);
+                Response response = client.performRequest(request);
                 return response.getStatusLine().getStatusCode() == HttpStatus.SC_OK;
             } catch (IOException e) {
                 throw new ElasticsearchException(e);

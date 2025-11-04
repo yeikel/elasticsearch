@@ -1,37 +1,21 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.cloud.gce.network;
 
 import org.elasticsearch.cloud.gce.GceMetadataService;
-import org.elasticsearch.cloud.gce.util.Access;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.component.AbstractComponent;
 import org.elasticsearch.common.network.NetworkService.CustomNameResolver;
-import org.elasticsearch.common.settings.Settings;
 
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URISyntaxException;
-import java.security.AccessController;
-import java.security.PrivilegedActionException;
-import java.security.PrivilegedExceptionAction;
 
 /**
  * <p>Resolves certain GCE related 'meta' hostnames into an actual hostname
@@ -43,7 +27,7 @@ import java.security.PrivilegedExceptionAction;
  * <li>_gce:hostname_</li>
  * </ul>
  */
-public class GceNameResolver extends AbstractComponent implements CustomNameResolver {
+public class GceNameResolver implements CustomNameResolver {
 
     private final GceMetadataService gceMetadataService;
 
@@ -77,8 +61,7 @@ public class GceNameResolver extends AbstractComponent implements CustomNameReso
     /**
      * Construct a {@link CustomNameResolver}.
      */
-    public GceNameResolver(Settings settings, GceMetadataService gceMetadataService) {
-        super(settings);
+    public GceNameResolver(GceMetadataService gceMetadataService) {
         this.gceMetadataService = gceMetadataService;
     }
 
@@ -105,18 +88,22 @@ public class GceNameResolver extends AbstractComponent implements CustomNameReso
             // We replace network placeholder with network interface value
             gceMetadataPath = Strings.replace(GceAddressResolverType.PRIVATE_IP.gceName, "{{network}}", network);
         } else {
-            throw new IllegalArgumentException("[" + value + "] is not one of the supported GCE network.host setting. " +
-                    "Expecting _gce_, _gce:privateIp:X_, _gce:hostname_");
+            throw new IllegalArgumentException(
+                "["
+                    + value
+                    + "] is not one of the supported GCE network.host setting. "
+                    + "Expecting _gce_, _gce:privateIp:X_, _gce:hostname_"
+            );
         }
 
         try {
-            String metadataResult = Access.doPrivilegedIOException(() -> gceMetadataService.metadata(gceMetadataPath));
+            String metadataResult = gceMetadataService.metadata(gceMetadataPath);
             if (metadataResult == null || metadataResult.length() == 0) {
                 throw new IOException("no gce metadata returned from [" + gceMetadataPath + "] for [" + value + "]");
             }
             // only one address: because we explicitly ask for only one via the GceHostnameType
             return new InetAddress[] { InetAddress.getByName(metadataResult) };
-        } catch (IOException e) {
+        } catch (URISyntaxException | IOException e) {
             throw new IOException("IOException caught when fetching InetAddress from [" + gceMetadataPath + "]", e);
         }
     }

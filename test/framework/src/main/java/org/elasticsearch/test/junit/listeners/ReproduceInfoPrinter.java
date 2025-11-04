@@ -1,30 +1,23 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 package org.elasticsearch.test.junit.listeners;
 
 import com.carrotsearch.randomizedtesting.ReproduceErrorMessageBuilder;
+
+import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.util.Constants;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.core.Booleans;
+import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.ESTestCase;
-import org.elasticsearch.test.rest.yaml.ESClientYamlSuiteTestCase;
 import org.junit.internal.AssumptionViolatedException;
 import org.junit.runner.Description;
 import org.junit.runner.notification.Failure;
@@ -35,9 +28,8 @@ import java.util.TimeZone;
 
 import static com.carrotsearch.randomizedtesting.SysGlobals.SYSPROP_ITERATIONS;
 import static com.carrotsearch.randomizedtesting.SysGlobals.SYSPROP_PREFIX;
+import static com.carrotsearch.randomizedtesting.SysGlobals.SYSPROP_TESTCLASS;
 import static com.carrotsearch.randomizedtesting.SysGlobals.SYSPROP_TESTMETHOD;
-import static org.elasticsearch.test.rest.yaml.ESClientYamlSuiteTestCase.REST_TESTS_BLACKLIST;
-import static org.elasticsearch.test.rest.yaml.ESClientYamlSuiteTestCase.REST_TESTS_SUITE;
 
 /**
  * A {@link RunListener} that emits a command you can use to re-run a failing test with the failing random seed to
@@ -45,7 +37,7 @@ import static org.elasticsearch.test.rest.yaml.ESClientYamlSuiteTestCase.REST_TE
  */
 public class ReproduceInfoPrinter extends RunListener {
 
-    protected final Logger logger = Loggers.getLogger(ESTestCase.class);
+    protected final Logger logger = LogManager.getLogger(ESTestCase.class);
 
     @Override
     public void testStarted(Description description) throws Exception {
@@ -61,7 +53,7 @@ public class ReproduceInfoPrinter extends RunListener {
      * Are we in the integ test phase?
      */
     static boolean inVerifyPhase() {
-        return Boolean.parseBoolean(System.getProperty("tests.verify.phase"));
+        return Booleans.parseBoolean(System.getProperty("tests.verify.phase", "false"));
     }
 
     @Override
@@ -71,20 +63,56 @@ public class ReproduceInfoPrinter extends RunListener {
             return;
         }
 
-        final StringBuilder b = new StringBuilder("REPRODUCE WITH: ./gradlew ");
+        final String gradlew = Constants.WINDOWS ? "gradlew" : "./gradlew";
+        final StringBuilder b = new StringBuilder("REPRODUCE WITH: " + gradlew + " ");
         String task = System.getProperty("tests.task");
-        // TODO: enforce (intellij still runs the runner?) or use default "test" but that won't work for integ
-        b.append(task);
+        boolean isBwcTest = Booleans.parseBoolean(System.getProperty("tests.bwc", "false"))
+            || System.getProperty("tests.bwc.main.version") != null
+            || System.getProperty("tests.bwc.refspec.main") != null;
 
+        // append Gradle test runner test filter string
+        b.append("\"" + task + "\"");
+        if (isBwcTest) {
+            // Use "legacy" method for bwc tests so that it applies globally to all upstream bwc test tasks
+            b.append(" -Dtests.class=\"");
+        } else {
+            b.append(" --tests \"");
+        }
+        b.append(failure.getDescription().getClassName());
+
+        final String methodName = failure.getDescription().getMethodName();
+        if (methodName != null) {
+            // fallback to system property filter when tests contain "."
+            if (methodName.contains(".") || isBwcTest) {
+                b.append("\" -Dtests.method=\"");
+                b.append(methodName);
+            } else {
+                b.append(".");
+                b.append(methodName);
+            }
+        }
+        b.append("\"");
         GradleMessageBuilder gradleMessageBuilder = new GradleMessageBuilder(b);
         gradleMessageBuilder.appendAllOpts(failure.getDescription());
 
-        // Client yaml suite tests are a special case as they allow for additional parameters
-        if (ESClientYamlSuiteTestCase.class.isAssignableFrom(failure.getDescription().getTestClass())) {
-            gradleMessageBuilder.appendClientYamlSuiteProperties();
+        if (isRestApiCompatibilityTest()) {
+            b.append(System.lineSeparator());
+            b.append(
+                "This is a Rest Api Compatibility Test. "
+                    + "See the developers guide for details how to troubleshoot - "
+                    + "https://github.com/elastic/elasticsearch/blob/master/REST_API_COMPATIBILITY.md"
+            );
         }
+        printToErr(b.toString());
+    }
 
-        System.err.println(b.toString());
+    private static boolean isRestApiCompatibilityTest() {
+        return Booleans.parseBoolean(System.getProperty("tests.restCompat", "false"));
+    }
+
+    @SuppressForbidden(reason = "printing repro info")
+    private static void printToErr(String s) {
+        System.err.println(s);
     }
 
     protected static class GradleMessageBuilder extends ReproduceErrorMessageBuilder {
@@ -96,11 +124,6 @@ public class ReproduceInfoPrinter extends RunListener {
         @Override
         public ReproduceErrorMessageBuilder appendAllOpts(Description description) {
             super.appendAllOpts(description);
-
-            if (description.getMethodName() != null) {
-                //prints out the raw method description instead of methodName(description) which filters out the parameters
-                super.appendOpt(SYSPROP_TESTMETHOD(), "\"" + description.getMethodName() + "\"");
-            }
 
             return appendESProperties();
         }
@@ -119,9 +142,14 @@ public class ReproduceInfoPrinter extends RunListener {
             if (sysPropName.equals(SYSPROP_ITERATIONS())) { // we don't want the iters to be in there!
                 return this;
             }
+            if (sysPropName.equals(SYSPROP_TESTCLASS())) {
+                // don't print out the test class, we print it ourselves in appendAllOpts
+                // without filtering out the parameters (needed for REST tests)
+                return this;
+            }
             if (sysPropName.equals(SYSPROP_TESTMETHOD())) {
-                //don't print out the test method, we print it ourselves in appendAllOpts
-                //without filtering out the parameters (needed for REST tests)
+                // don't print out the test method, we print it ourselves in appendAllOpts
+                // without filtering out the parameters (needed for REST tests)
                 return this;
             }
             if (sysPropName.equals(SYSPROP_PREFIX())) {
@@ -134,24 +162,44 @@ public class ReproduceInfoPrinter extends RunListener {
             return this;
         }
 
-        public ReproduceErrorMessageBuilder appendESProperties() {
+        private ReproduceErrorMessageBuilder appendESProperties() {
             appendProperties("tests.es.logger.level");
             if (inVerifyPhase()) {
                 // these properties only make sense for integration tests
                 appendProperties(ESIntegTestCase.TESTS_ENABLE_MOCK_MODULES);
             }
-            appendProperties("tests.assertion.disabled", "tests.security.manager", "tests.nightly", "tests.jvms",
-                             "tests.client.ratio", "tests.heap.size", "tests.bwc", "tests.bwc.version", "build.snapshot");
-            if (System.getProperty("tests.jvm.argline") != null && !System.getProperty("tests.jvm.argline").isEmpty()) {
+            appendProperties(
+                "tests.assertion.disabled",
+                "tests.nightly",
+                "tests.jvms",
+                "tests.client.ratio",
+                "tests.heap.size",
+                "tests.bwc",
+                "tests.bwc.version",
+                "build.snapshot",
+                "tests.configure_test_clusters_with_one_processor",
+                "tests.bwc.main.version",
+                "tests.bwc.refspec.main"
+            );
+            if (System.getProperty("tests.jvm.argline") != null && System.getProperty("tests.jvm.argline").isEmpty() == false) {
                 appendOpt("tests.jvm.argline", "\"" + System.getProperty("tests.jvm.argline") + "\"");
+            }
+            if (Booleans.parseBoolean(System.getProperty("build.snapshot", "true")) == false) {
+                appendOpt("license.key", "x-pack/license-tools/src/test/resources/public.key");
             }
             appendOpt("tests.locale", Locale.getDefault().toLanguageTag());
             appendOpt("tests.timezone", TimeZone.getDefault().getID());
+            appendOpt("tests.distribution", System.getProperty("tests.distribution"));
+            if (Runtime.version().build().isPresent()
+                && ("ea".equalsIgnoreCase(Runtime.version().pre().orElse(""))
+                    || ("rc".equalsIgnoreCase(Runtime.version().pre().orElse(""))))) {
+                appendOpt("runtime.java", Runtime.version().feature() + "-pre");
+                appendOpt("runtime.java.build", Integer.toString(Runtime.version().build().get()));
+            } else {
+                appendOpt("runtime.java", Integer.toString(Runtime.version().feature()));
+            }
+            appendOpt(ESTestCase.FIPS_SYSPROP, System.getProperty(ESTestCase.FIPS_SYSPROP));
             return this;
-        }
-
-        public ReproduceErrorMessageBuilder appendClientYamlSuiteProperties() {
-            return appendProperties(REST_TESTS_SUITE, REST_TESTS_BLACKLIST);
         }
 
         protected ReproduceErrorMessageBuilder appendProperties(String... properties) {

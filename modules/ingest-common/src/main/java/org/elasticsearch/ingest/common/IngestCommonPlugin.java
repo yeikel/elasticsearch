@@ -1,137 +1,103 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.ingest.common;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.function.Supplier;
-
-import org.elasticsearch.action.ActionRequest;
-import org.elasticsearch.action.ActionResponse;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
+import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.IndexScopedSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.settings.SettingsFilter;
+import org.elasticsearch.features.NodeFeature;
+import org.elasticsearch.ingest.DropProcessor;
+import org.elasticsearch.ingest.PipelineProcessor;
 import org.elasticsearch.ingest.Processor;
 import org.elasticsearch.plugins.ActionPlugin;
+import org.elasticsearch.plugins.ExtensiblePlugin;
 import org.elasticsearch.plugins.IngestPlugin;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestHandler;
 
-public class IngestCommonPlugin extends Plugin implements ActionPlugin, IngestPlugin {
+import java.util.List;
+import java.util.Map;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 
-    // Code for loading built-in grok patterns packaged with the jar file:
-    private static final String[] PATTERN_NAMES = new String[] {
-        "aws", "bacula", "bro", "exim", "firewalls", "grok-patterns", "haproxy",
-        "java", "junos", "linux-syslog", "mcollective-patterns", "mongodb", "nagios",
-        "postgresql", "rails", "redis", "ruby"
-    };
-    static final Map<String, String> GROK_PATTERNS;
-    static {
-        try {
-            GROK_PATTERNS = loadBuiltinPatterns();
-        } catch (IOException e) {
-            throw new UncheckedIOException("unable to load built-in grok patterns", e);
-        }
-    }
+import static java.util.Map.entry;
 
-    public IngestCommonPlugin() throws IOException {
-    }
+public class IngestCommonPlugin extends Plugin implements ActionPlugin, IngestPlugin, ExtensiblePlugin {
+
+    public IngestCommonPlugin() {}
 
     @Override
     public Map<String, Processor.Factory> getProcessors(Processor.Parameters parameters) {
-        Map<String, Processor.Factory> processors = new HashMap<>();
-        processors.put(DateProcessor.TYPE, new DateProcessor.Factory(parameters.scriptService));
-        processors.put(SetProcessor.TYPE, new SetProcessor.Factory(parameters.scriptService));
-        processors.put(AppendProcessor.TYPE, new AppendProcessor.Factory(parameters.scriptService));
-        processors.put(RenameProcessor.TYPE, new RenameProcessor.Factory());
-        processors.put(RemoveProcessor.TYPE, new RemoveProcessor.Factory(parameters.scriptService));
-        processors.put(SplitProcessor.TYPE, new SplitProcessor.Factory());
-        processors.put(JoinProcessor.TYPE, new JoinProcessor.Factory());
-        processors.put(UppercaseProcessor.TYPE, new UppercaseProcessor.Factory());
-        processors.put(LowercaseProcessor.TYPE, new LowercaseProcessor.Factory());
-        processors.put(TrimProcessor.TYPE, new TrimProcessor.Factory());
-        processors.put(ConvertProcessor.TYPE, new ConvertProcessor.Factory());
-        processors.put(GsubProcessor.TYPE, new GsubProcessor.Factory());
-        processors.put(FailProcessor.TYPE, new FailProcessor.Factory(parameters.scriptService));
-        processors.put(ForEachProcessor.TYPE, new ForEachProcessor.Factory());
-        processors.put(DateIndexNameProcessor.TYPE, new DateIndexNameProcessor.Factory());
-        processors.put(SortProcessor.TYPE, new SortProcessor.Factory());
-        processors.put(GrokProcessor.TYPE, new GrokProcessor.Factory(GROK_PATTERNS));
-        processors.put(ScriptProcessor.TYPE, new ScriptProcessor.Factory(parameters.scriptService));
-        processors.put(DotExpanderProcessor.TYPE, new DotExpanderProcessor.Factory());
-        processors.put(JsonProcessor.TYPE, new JsonProcessor.Factory());
-        processors.put(KeyValueProcessor.TYPE, new KeyValueProcessor.Factory());
-        processors.put(URLDecodeProcessor.TYPE, new URLDecodeProcessor.Factory());
-        return Collections.unmodifiableMap(processors);
+        return Map.ofEntries(
+            entry(AppendProcessor.TYPE, new AppendProcessor.Factory(parameters.scriptService)),
+            entry(BytesProcessor.TYPE, new BytesProcessor.Factory()),
+            entry(CommunityIdProcessor.TYPE, new CommunityIdProcessor.Factory()),
+            entry(ConvertProcessor.TYPE, new ConvertProcessor.Factory()),
+            entry(CsvProcessor.TYPE, new CsvProcessor.Factory()),
+            entry(DateIndexNameProcessor.TYPE, new DateIndexNameProcessor.Factory(parameters.scriptService)),
+            entry(DateProcessor.TYPE, new DateProcessor.Factory(parameters.scriptService)),
+            entry(DissectProcessor.TYPE, new DissectProcessor.Factory()),
+            entry(DotExpanderProcessor.TYPE, new DotExpanderProcessor.Factory()),
+            entry(DropProcessor.TYPE, new DropProcessor.Factory()),
+            entry(FailProcessor.TYPE, new FailProcessor.Factory(parameters.scriptService)),
+            entry(FingerprintProcessor.TYPE, new FingerprintProcessor.Factory()),
+            entry(ForEachProcessor.TYPE, new ForEachProcessor.Factory(parameters.scriptService)),
+            entry(GrokProcessor.TYPE, new GrokProcessor.Factory(parameters.matcherWatchdog)),
+            entry(GsubProcessor.TYPE, new GsubProcessor.Factory()),
+            entry(HtmlStripProcessor.TYPE, new HtmlStripProcessor.Factory()),
+            entry(JoinProcessor.TYPE, new JoinProcessor.Factory()),
+            entry(JsonProcessor.TYPE, new JsonProcessor.Factory()),
+            entry(KeyValueProcessor.TYPE, new KeyValueProcessor.Factory(parameters.scriptService)),
+            entry(LowercaseProcessor.TYPE, new LowercaseProcessor.Factory()),
+            entry(NetworkDirectionProcessor.TYPE, new NetworkDirectionProcessor.Factory(parameters.scriptService)),
+            entry(PipelineProcessor.TYPE, new PipelineProcessor.Factory(parameters.ingestService)),
+            entry(RegisteredDomainProcessor.TYPE, new RegisteredDomainProcessor.Factory()),
+            entry(RecoverFailureDocumentProcessor.TYPE, new RecoverFailureDocumentProcessor.Factory()),
+            entry(RemoveProcessor.TYPE, new RemoveProcessor.Factory(parameters.scriptService)),
+            entry(RenameProcessor.TYPE, new RenameProcessor.Factory(parameters.scriptService)),
+            entry(RerouteProcessor.TYPE, new RerouteProcessor.Factory()),
+            entry(ScriptProcessor.TYPE, new ScriptProcessor.Factory(parameters.scriptService)),
+            entry(SetProcessor.TYPE, new SetProcessor.Factory(parameters.scriptService)),
+            entry(SortProcessor.TYPE, new SortProcessor.Factory()),
+            entry(SplitProcessor.TYPE, new SplitProcessor.Factory()),
+            entry(TerminateProcessor.TYPE, new TerminateProcessor.Factory()),
+            entry(TrimProcessor.TYPE, new TrimProcessor.Factory()),
+            entry(URLDecodeProcessor.TYPE, new URLDecodeProcessor.Factory()),
+            entry(UppercaseProcessor.TYPE, new UppercaseProcessor.Factory()),
+            entry(UriPartsProcessor.TYPE, new UriPartsProcessor.Factory())
+        );
     }
 
     @Override
-    public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
-        return Arrays.asList(new ActionHandler<>(GrokProcessorGetAction.INSTANCE, GrokProcessorGetAction.TransportAction.class));
+    public List<ActionHandler> getActions() {
+        return List.of(new ActionHandler(GrokProcessorGetAction.INSTANCE, GrokProcessorGetAction.TransportAction.class));
     }
 
     @Override
-    public List<RestHandler> getRestHandlers(Settings settings, RestController restController, ClusterSettings clusterSettings,
-                                             IndexScopedSettings indexScopedSettings, SettingsFilter settingsFilter,
-                                             IndexNameExpressionResolver indexNameExpressionResolver,
-                                             Supplier<DiscoveryNodes> nodesInCluster) {
-        return Arrays.asList(new GrokProcessorGetAction.RestAction(settings, restController));
+    public List<RestHandler> getRestHandlers(
+        Settings settings,
+        NamedWriteableRegistry namedWriteableRegistry,
+        RestController restController,
+        ClusterSettings clusterSettings,
+        IndexScopedSettings indexScopedSettings,
+        SettingsFilter settingsFilter,
+        IndexNameExpressionResolver indexNameExpressionResolver,
+        Supplier<DiscoveryNodes> nodesInCluster,
+        Predicate<NodeFeature> clusterSupportsFeature
+    ) {
+        return List.of(new GrokProcessorGetAction.RestAction());
     }
 
-
-    public static Map<String, String> loadBuiltinPatterns() throws IOException {
-        Map<String, String> builtinPatterns = new HashMap<>();
-        for (String pattern : PATTERN_NAMES) {
-            try(InputStream is = IngestCommonPlugin.class.getResourceAsStream("/patterns/" + pattern)) {
-                loadPatterns(builtinPatterns, is);
-            }
-        }
-        return Collections.unmodifiableMap(builtinPatterns);
-    }
-
-    private static void loadPatterns(Map<String, String> patternBank, InputStream inputStream) throws IOException {
-        String line;
-        BufferedReader br = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
-        while ((line = br.readLine()) != null) {
-            String trimmedLine = line.replaceAll("^\\s+", "");
-            if (trimmedLine.startsWith("#") || trimmedLine.length() == 0) {
-                continue;
-            }
-
-            String[] parts = trimmedLine.split("\\s+", 2);
-            if (parts.length == 2) {
-                patternBank.put(parts[0], parts[1]);
-            }
-        }
-    }
 }

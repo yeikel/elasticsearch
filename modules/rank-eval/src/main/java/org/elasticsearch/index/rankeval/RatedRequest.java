@@ -1,36 +1,27 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.index.rankeval;
 
-import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
-import org.elasticsearch.common.xcontent.ConstructingObjectParser;
-import org.elasticsearch.common.xcontent.ToXContentObject;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.core.Nullable;
+import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.rankeval.RatedDocument.DocumentKey;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.xcontent.ConstructingObjectParser;
+import org.elasticsearch.xcontent.ParseField;
+import org.elasticsearch.xcontent.ToXContentObject;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -42,6 +33,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Definition of a particular query in the ranking evaluation request.<br>
@@ -70,14 +62,16 @@ import java.util.Set;
  * }
  * </pre>
  */
-@SuppressWarnings("unchecked")
 public class RatedRequest implements Writeable, ToXContentObject {
     private final String id;
     private final List<String> summaryFields;
     private final List<RatedDocument> ratedDocs;
-    // Search request to execute for this rated request. This can be null if template and corresponding parameters are supplied.
+    /**
+     * Search request to execute for this rated request. This can be null in
+     * case the query is supplied as a template with corresponding parameters
+     */
     @Nullable
-    private SearchSourceBuilder testRequest;
+    private final SearchSourceBuilder evaluationRequest;
     /**
      * Map of parameters to use for filling a query template, can be used
      * instead of providing testRequest.
@@ -86,39 +80,68 @@ public class RatedRequest implements Writeable, ToXContentObject {
     @Nullable
     private String templateId;
 
-    private RatedRequest(String id, List<RatedDocument> ratedDocs, SearchSourceBuilder testRequest,
-            Map<String, Object> params, String templateId) {
-        if (params != null && (params.size() > 0 && testRequest != null)) {
+    /**
+     * Create a rated request with template ids and parameters.
+     *
+     * @param id a unique name for this rated request
+     * @param ratedDocs a list of document ratings
+     * @param params template parameters
+     * @param templateId a templare id
+     */
+    public RatedRequest(String id, List<RatedDocument> ratedDocs, Map<String, Object> params, String templateId) {
+        this(id, ratedDocs, null, params, templateId);
+    }
+
+    /**
+     * Create a rated request using a {@link SearchSourceBuilder} to define the
+     * evaluated query.
+     *
+     * @param id a unique name for this rated request
+     * @param ratedDocs a list of document ratings
+     * @param evaluatedQuery the query that is evaluated
+     */
+    public RatedRequest(String id, List<RatedDocument> ratedDocs, SearchSourceBuilder evaluatedQuery) {
+        this(id, ratedDocs, evaluatedQuery, new HashMap<>(), null);
+    }
+
+    private RatedRequest(
+        String id,
+        List<RatedDocument> ratedDocs,
+        SearchSourceBuilder evaluatedQuery,
+        Map<String, Object> params,
+        String templateId
+    ) {
+        if (params != null && (params.size() > 0 && evaluatedQuery != null)) {
             throw new IllegalArgumentException(
-                    "Ambiguous rated request: Set both, verbatim test request and test request "
-                    + "template parameters.");
+                "Ambiguous rated request: Set both, verbatim test request and test request " + "template parameters."
+            );
         }
-        if (templateId != null && testRequest != null) {
+        if (templateId != null && evaluatedQuery != null) {
             throw new IllegalArgumentException(
-                    "Ambiguous rated request: Set both, verbatim test request and test request "
-                    + "template parameters.");
+                "Ambiguous rated request: Set both, verbatim test request and test request " + "template parameters."
+            );
         }
-        if ((params == null || params.size() < 1) && testRequest == null) {
-            throw new IllegalArgumentException(
-                    "Need to set at least test request or test request template parameters.");
+        if ((params == null || params.size() < 1) && evaluatedQuery == null) {
+            throw new IllegalArgumentException("Need to set at least test request or test request template parameters.");
         }
         if ((params != null && params.size() > 0) && templateId == null) {
-            throw new IllegalArgumentException(
-                    "If template parameters are supplied need to set id of template to apply "
-                    + "them to too.");
+            throw new IllegalArgumentException("If template parameters are supplied need to set id of template to apply " + "them to too.");
         }
+        validateEvaluatedQuery(evaluatedQuery);
+
         // check that not two documents with same _index/id are specified
         Set<DocumentKey> docKeys = new HashSet<>();
         for (RatedDocument doc : ratedDocs) {
             if (docKeys.add(doc.getKey()) == false) {
-                String docKeyToString = doc.getKey().toString().replaceAll("\n", "").replaceAll("  ", " ");
+                String docKeyToString = doc.getKey().toString().replace("\n", "").replace("  ", " ");
                 throw new IllegalArgumentException(
-                        "Found duplicate rated document key [" + docKeyToString + "] in evaluation request [" + id + "]");
+                    "Found duplicate rated document key [" + docKeyToString + "] in evaluation request [" + id + "]"
+                );
             }
         }
 
         this.id = id;
-        this.testRequest = testRequest;
+        this.evaluationRequest = evaluatedQuery;
         this.ratedDocs = new ArrayList<>(ratedDocs);
         if (params != null) {
             this.params = new HashMap<>(params);
@@ -129,25 +152,37 @@ public class RatedRequest implements Writeable, ToXContentObject {
         this.summaryFields = new ArrayList<>();
     }
 
-    public RatedRequest(String id, List<RatedDocument> ratedDocs, Map<String, Object> params,
-            String templateId) {
-        this(id, ratedDocs, null, params, templateId);
+    static void validateEvaluatedQuery(SearchSourceBuilder evaluationRequest) {
+        // ensure that testRequest, if set, does not contain aggregation, suggest or highlighting section
+        if (evaluationRequest != null) {
+            if (evaluationRequest.suggest() != null) {
+                throw new IllegalArgumentException("Query in rated requests should not contain a suggest section.");
+            }
+            if (evaluationRequest.aggregations() != null) {
+                throw new IllegalArgumentException("Query in rated requests should not contain aggregations.");
+            }
+            if (evaluationRequest.highlighter() != null) {
+                throw new IllegalArgumentException("Query in rated requests should not contain a highlighter section.");
+            }
+            if (evaluationRequest.explain() != null && evaluationRequest.explain()) {
+                throw new IllegalArgumentException("Query in rated requests should not use explain.");
+            }
+            if (evaluationRequest.profile()) {
+                throw new IllegalArgumentException("Query in rated requests should not use profile.");
+            }
+        }
     }
 
-    public RatedRequest(String id, List<RatedDocument> ratedDocs, SearchSourceBuilder testRequest) {
-        this(id, ratedDocs, testRequest, new HashMap<>(), null);
-    }
-
-    public RatedRequest(StreamInput in) throws IOException {
+    RatedRequest(StreamInput in) throws IOException {
         this.id = in.readString();
-        testRequest = in.readOptionalWriteable(SearchSourceBuilder::new);
+        evaluationRequest = in.readOptionalWriteable(SearchSourceBuilder::new);
 
         int intentSize = in.readInt();
         ratedDocs = new ArrayList<>(intentSize);
         for (int i = 0; i < intentSize; i++) {
             ratedDocs.add(new RatedDocument(in));
         }
-        this.params = in.readMap();
+        this.params = in.readGenericMap();
         int summaryFieldsSize = in.readInt();
         summaryFields = new ArrayList<>(summaryFieldsSize);
         for (int i = 0; i < summaryFieldsSize; i++) {
@@ -159,13 +194,13 @@ public class RatedRequest implements Writeable, ToXContentObject {
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeString(id);
-        out.writeOptionalWriteable(testRequest);
+        out.writeOptionalWriteable(evaluationRequest);
 
         out.writeInt(ratedDocs.size());
         for (RatedDocument ratedDoc : ratedDocs) {
             ratedDoc.writeTo(out);
         }
-        out.writeMap(params);
+        out.writeGenericMap(params);
         out.writeInt(summaryFields.size());
         for (String fieldName : summaryFields) {
             out.writeString(fieldName);
@@ -173,8 +208,8 @@ public class RatedRequest implements Writeable, ToXContentObject {
         out.writeOptionalString(this.templateId);
     }
 
-    public SearchSourceBuilder getTestRequest() {
-        return testRequest;
+    public SearchSourceBuilder getEvaluationRequest() {
+        return evaluationRequest;
     }
 
     /** return the user supplied request id */
@@ -192,7 +227,7 @@ public class RatedRequest implements Writeable, ToXContentObject {
         return Collections.unmodifiableMap(this.params);
     }
 
-    /** return the parameters if this request uses a template, otherwise this will be <tt>null</tt>. */
+    /** return the parameters if this request uses a template, otherwise this will be {@code null}. */
     public String getTemplateId() {
         return this.templateId;
     }
@@ -202,8 +237,8 @@ public class RatedRequest implements Writeable, ToXContentObject {
         return Collections.unmodifiableList(summaryFields);
     }
 
-    public void addSummaryFields(List<String> summaryFields) {
-        this.summaryFields.addAll(Objects.requireNonNull(summaryFields, "no summary fields supplied"));
+    public void addSummaryFields(List<String> summaryFieldsToAdd) {
+        this.summaryFields.addAll(Objects.requireNonNull(summaryFieldsToAdd, "no summary fields supplied"));
     }
 
     private static final ParseField ID_FIELD = new ParseField("id");
@@ -213,17 +248,26 @@ public class RatedRequest implements Writeable, ToXContentObject {
     private static final ParseField FIELDS_FIELD = new ParseField("summary_fields");
     private static final ParseField TEMPLATE_ID_FIELD = new ParseField("template_id");
 
-    private static final ConstructingObjectParser<RatedRequest, Void> PARSER = new ConstructingObjectParser<>("requests",
-            a -> new RatedRequest((String) a[0], (List<RatedDocument>) a[1], (SearchSourceBuilder) a[2], (Map<String, Object>) a[3],
-                    (String) a[4]));
+    @SuppressWarnings("unchecked")
+    private static final ConstructingObjectParser<RatedRequest, Predicate<NodeFeature>> PARSER = new ConstructingObjectParser<>(
+        "request",
+        a -> new RatedRequest(
+            (String) a[0],
+            (List<RatedDocument>) a[1],
+            (SearchSourceBuilder) a[2],
+            (Map<String, Object>) a[3],
+            (String) a[4]
+        )
+    );
 
     static {
         PARSER.declareString(ConstructingObjectParser.constructorArg(), ID_FIELD);
-        PARSER.declareObjectArray(ConstructingObjectParser.constructorArg(), (p, c) -> {
-            return RatedDocument.fromXContent(p);
-        }, RATINGS_FIELD);
-        PARSER.declareObject(ConstructingObjectParser.optionalConstructorArg(), (p, c) ->
-                SearchSourceBuilder.fromXContent(p), REQUEST_FIELD);
+        PARSER.declareObjectArray(ConstructingObjectParser.constructorArg(), (p, c) -> RatedDocument.fromXContent(p), RATINGS_FIELD);
+        PARSER.declareObject(
+            ConstructingObjectParser.optionalConstructorArg(),
+            (p, c) -> new SearchSourceBuilder().parseXContent(p, false, c),
+            REQUEST_FIELD
+        );
         PARSER.declareObject(ConstructingObjectParser.optionalConstructorArg(), (p, c) -> p.map(), PARAMS_FIELD);
         PARSER.declareStringArray(RatedRequest::addSummaryFields, FIELDS_FIELD);
         PARSER.declareString(ConstructingObjectParser.optionalConstructorArg(), TEMPLATE_ID_FIELD);
@@ -232,20 +276,20 @@ public class RatedRequest implements Writeable, ToXContentObject {
     /**
      * parse from rest representation
      */
-    public static RatedRequest fromXContent(XContentParser parser) {
-        return PARSER.apply(parser, null);
+    public static RatedRequest fromXContent(XContentParser parser, Predicate<NodeFeature> clusterSupportsFeature) {
+        return PARSER.apply(parser, clusterSupportsFeature);
     }
 
     @Override
-    public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+    public XContentBuilder toXContent(XContentBuilder builder, Params xContentParams) throws IOException {
         builder.startObject();
         builder.field(ID_FIELD.getPreferredName(), this.id);
-        if (testRequest != null) {
-            builder.field(REQUEST_FIELD.getPreferredName(), this.testRequest);
+        if (evaluationRequest != null) {
+            builder.field(REQUEST_FIELD.getPreferredName(), this.evaluationRequest);
         }
         builder.startArray(RATINGS_FIELD.getPreferredName());
         for (RatedDocument doc : this.ratedDocs) {
-            doc.toXContent(builder, params);
+            doc.toXContent(builder, xContentParams);
         }
         builder.endArray();
         if (this.templateId != null) {
@@ -285,16 +329,16 @@ public class RatedRequest implements Writeable, ToXContentObject {
 
         RatedRequest other = (RatedRequest) obj;
 
-        return Objects.equals(id, other.id) && Objects.equals(testRequest, other.testRequest)
-                && Objects.equals(summaryFields, other.summaryFields)
-                && Objects.equals(ratedDocs, other.ratedDocs)
-                && Objects.equals(params, other.params)
-                && Objects.equals(templateId, other.templateId);
+        return Objects.equals(id, other.id)
+            && Objects.equals(evaluationRequest, other.evaluationRequest)
+            && Objects.equals(summaryFields, other.summaryFields)
+            && Objects.equals(ratedDocs, other.ratedDocs)
+            && Objects.equals(params, other.params)
+            && Objects.equals(templateId, other.templateId);
     }
 
     @Override
     public final int hashCode() {
-        return Objects.hash(id, testRequest, summaryFields, ratedDocs, params,
-                templateId);
+        return Objects.hash(id, evaluationRequest, summaryFields, ratedDocs, params, templateId);
     }
 }

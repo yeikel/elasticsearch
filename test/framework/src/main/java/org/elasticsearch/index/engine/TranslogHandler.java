@@ -1,56 +1,42 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
-import org.elasticsearch.common.xcontent.NamedXContentRegistry;
-import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.TransportVersion;
+import org.elasticsearch.common.lucene.Lucene;
+import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
+import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.index.IndexSettings;
-import org.elasticsearch.index.analysis.AnalyzerScope;
-import org.elasticsearch.index.analysis.IndexAnalyzers;
-import org.elasticsearch.index.analysis.NamedAnalyzer;
-import org.elasticsearch.index.mapper.DocumentMapper;
-import org.elasticsearch.index.mapper.DocumentMapperForType;
+import org.elasticsearch.index.VersionType;
+import org.elasticsearch.index.mapper.MapperMetrics;
+import org.elasticsearch.index.mapper.MapperRegistry;
 import org.elasticsearch.index.mapper.MapperService;
-import org.elasticsearch.index.mapper.Mapping;
-import org.elasticsearch.index.mapper.RootObjectMapper;
+import org.elasticsearch.index.mapper.SourceToParse;
+import org.elasticsearch.index.mapper.Uid;
+import org.elasticsearch.index.seqno.SequenceNumbers;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.similarity.SimilarityService;
 import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.indices.IndicesModule;
-import org.elasticsearch.indices.mapper.MapperRegistry;
+import org.elasticsearch.xcontent.NamedXContentRegistry;
+import org.elasticsearch.xcontent.XContentParserConfiguration;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
-import static org.elasticsearch.index.mapper.SourceToParse.source;
 
-public class TranslogHandler implements EngineConfig.TranslogRecoveryRunner {
+public class TranslogHandler implements Engine.TranslogRecoveryRunner {
 
     private final MapperService mapperService;
-    public Mapping mappingUpdate = null;
-    private final Map<String, Mapping> recoveredTypes = new HashMap<>();
 
     private final AtomicLong appliedOperations = new AtomicLong();
 
@@ -58,48 +44,37 @@ public class TranslogHandler implements EngineConfig.TranslogRecoveryRunner {
         return appliedOperations.get();
     }
 
+    public TranslogHandler(MapperService mapperService) {
+        this.mapperService = mapperService;
+    }
+
     public TranslogHandler(NamedXContentRegistry xContentRegistry, IndexSettings indexSettings) {
-        NamedAnalyzer defaultAnalyzer = new NamedAnalyzer("default", AnalyzerScope.INDEX, new StandardAnalyzer());
-        IndexAnalyzers indexAnalyzers =
-                new IndexAnalyzers(indexSettings, defaultAnalyzer, defaultAnalyzer, defaultAnalyzer, emptyMap(), emptyMap());
         SimilarityService similarityService = new SimilarityService(indexSettings, null, emptyMap());
         MapperRegistry mapperRegistry = new IndicesModule(emptyList()).getMapperRegistry();
-        mapperService = new MapperService(indexSettings, indexAnalyzers, xContentRegistry, similarityService, mapperRegistry,
-                () -> null);
+        mapperService = new MapperService(
+            () -> TransportVersion.current(),
+            indexSettings,
+            (type, name) -> Lucene.STANDARD_ANALYZER,
+            XContentParserConfiguration.EMPTY.withRegistry(xContentRegistry).withDeprecationHandler(LoggingDeprecationHandler.INSTANCE),
+            similarityService,
+            mapperRegistry,
+            () -> null,
+            indexSettings.getMode().idFieldMapperWithoutFieldData(),
+            null,
+            query -> {
+                throw new UnsupportedOperationException("The bitset filter cache is not available in translog operations");
+            },
+            MapperMetrics.NOOP
+        );
     }
 
-    private DocumentMapperForType docMapper(String type) {
-        RootObjectMapper.Builder rootBuilder = new RootObjectMapper.Builder(type);
-        DocumentMapper.Builder b = new DocumentMapper.Builder(rootBuilder, mapperService);
-        return new DocumentMapperForType(b.build(mapperService), mappingUpdate);
-    }
-
-    private void applyOperation(Engine engine, Engine.Operation operation) throws IOException {
+    private static void applyOperation(Engine engine, Engine.Operation operation) throws IOException {
         switch (operation.operationType()) {
-            case INDEX:
-                Engine.Index engineIndex = (Engine.Index) operation;
-                Mapping update = engineIndex.parsedDoc().dynamicMappingsUpdate();
-                if (engineIndex.parsedDoc().dynamicMappingsUpdate() != null) {
-                    recoveredTypes.compute(engineIndex.type(), (k, mapping) -> mapping == null ? update : mapping.merge(update, false));
-                }
-                engine.index(engineIndex);
-                break;
-            case DELETE:
-                engine.delete((Engine.Delete) operation);
-                break;
-            case NO_OP:
-                engine.noOp((Engine.NoOp) operation);
-                break;
-            default:
-                throw new IllegalStateException("No operation defined for [" + operation + "]");
+            case INDEX -> engine.index((Engine.Index) operation);
+            case DELETE -> engine.delete((Engine.Delete) operation);
+            case NO_OP -> engine.noOp((Engine.NoOp) operation);
+            default -> throw new IllegalStateException("No operation defined for [" + operation + "]");
         }
-    }
-
-    /**
-     * Returns the recovered types modifying the mapping during the recovery
-     */
-    public Map<String, Mapping> getRecoveredTypes() {
-        return recoveredTypes;
     }
 
     @Override
@@ -111,34 +86,56 @@ public class TranslogHandler implements EngineConfig.TranslogRecoveryRunner {
             opsRecovered++;
             appliedOperations.incrementAndGet();
         }
+        engine.syncTranslog();
         return opsRecovered;
     }
 
-    private Engine.Operation convertToEngineOp(Translog.Operation operation, Engine.Operation.Origin origin) {
+    public Engine.Operation convertToEngineOp(Translog.Operation operation, Engine.Operation.Origin origin) {
+        // If a translog op is replayed on the primary (eg. ccr), we need to use external instead of null for its version type.
+        final VersionType versionType = (origin == Engine.Operation.Origin.PRIMARY) ? VersionType.EXTERNAL : null;
         switch (operation.opType()) {
-            case INDEX:
+            case INDEX -> {
                 final Translog.Index index = (Translog.Index) operation;
-                final String indexName = mapperService.index().getName();
-                final Engine.Index engineIndex = IndexShard.prepareIndex(docMapper(index.type()),
-                        mapperService.getIndexSettings().getIndexVersionCreated(),
-                        source(indexName, index.type(), index.id(), index.source(), XContentFactory.xContentType(index.source()))
-                                .routing(index.routing()).parent(index.parent()), index.seqNo(), index.primaryTerm(),
-                        index.version(), index.versionType().versionTypeForReplicationAndRecovery(), origin,
-                        index.getAutoGeneratedIdTimestamp(), true);
+                final Engine.Index engineIndex = IndexShard.prepareIndex(
+                    mapperService,
+                    new SourceToParse(
+                        Uid.decodeId(index.uid()),
+                        index.source(),
+                        XContentHelper.xContentType(index.source()),
+                        index.routing()
+                    ),
+                    index.seqNo(),
+                    index.primaryTerm(),
+                    index.version(),
+                    versionType,
+                    origin,
+                    index.getAutoGeneratedIdTimestamp(),
+                    true,
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    SequenceNumbers.UNASSIGNED_PRIMARY_TERM,
+                    System.nanoTime()
+                );
                 return engineIndex;
-            case DELETE:
+            }
+            case DELETE -> {
                 final Translog.Delete delete = (Translog.Delete) operation;
-                final Engine.Delete engineDelete = new Engine.Delete(delete.type(), delete.id(), delete.uid(), delete.seqNo(),
-                        delete.primaryTerm(), delete.version(), delete.versionType().versionTypeForReplicationAndRecovery(),
-                        origin, System.nanoTime());
-                return engineDelete;
-            case NO_OP:
+                return IndexShard.prepareDelete(
+                    Uid.decodeId(delete.uid()),
+                    delete.seqNo(),
+                    delete.primaryTerm(),
+                    delete.version(),
+                    versionType,
+                    origin,
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    SequenceNumbers.UNASSIGNED_PRIMARY_TERM
+                );
+            }
+            case NO_OP -> {
                 final Translog.NoOp noOp = (Translog.NoOp) operation;
-                final Engine.NoOp engineNoOp =
-                        new Engine.NoOp(noOp.seqNo(), noOp.primaryTerm(), origin, System.nanoTime(), noOp.reason());
+                final Engine.NoOp engineNoOp = new Engine.NoOp(noOp.seqNo(), noOp.primaryTerm(), origin, System.nanoTime(), noOp.reason());
                 return engineNoOp;
-            default:
-                throw new IllegalStateException("No operation defined for [" + operation + "]");
+            }
+            default -> throw new IllegalStateException("No operation defined for [" + operation + "]");
         }
     }
 

@@ -1,29 +1,18 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 package org.elasticsearch.test;
 
 import org.elasticsearch.cluster.routing.ShardRouting;
-import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.inject.Module;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexModule;
 import org.elasticsearch.index.IndexService;
@@ -32,7 +21,7 @@ import org.elasticsearch.index.shard.IndexEventListener;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.shard.IndexShardState;
 import org.elasticsearch.index.shard.ShardId;
-import org.elasticsearch.indices.cluster.IndicesClusterStateService.AllocatedIndices.IndexRemovalReason;
+import org.elasticsearch.indices.cluster.IndexRemovalReason;
 import org.elasticsearch.plugins.Plugin;
 
 import java.util.Arrays;
@@ -41,8 +30,9 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * This is a testing plugin that registers a generic {@link org.elasticsearch.test.MockIndexEventListener.TestEventListener} as a node level service as well as a listener
- * on every index. Tests can access it like this:
+ * This is a testing plugin that registers a generic
+ * {@link MockIndexEventListener.TestEventListener} as a node level service
+ * as well as a listener on every index. Tests can access it like this:
  * <pre>
  *     TestEventListener listener = internalCluster().getInstance(MockIndexEventListener.TestEventListener.class, node1);
  *     listener.setNewDelegate(new IndexEventListener() {
@@ -60,6 +50,7 @@ public final class MockIndexEventListener {
          * For tests to pass in to fail on listener invocation
          */
         public static final Setting<Boolean> INDEX_FAIL = Setting.boolSetting("index.fail", false, Property.IndexScope);
+
         @Override
         public List<Setting<?>> getSettings() {
             return Arrays.asList(INDEX_FAIL);
@@ -71,16 +62,18 @@ public final class MockIndexEventListener {
         }
 
         @Override
-        public Collection<Module> createGuiceModules() {
-            return Collections.singleton(binder -> binder.bind(TestEventListener.class).toInstance(listener));
+        public Collection<?> createComponents(PluginServices services) {
+            return Collections.singletonList(listener);
         }
     }
 
     public static class TestEventListener implements IndexEventListener {
-        private volatile IndexEventListener delegate = new IndexEventListener() {};
+        private volatile IndexEventListener delegate = new IndexEventListener() {
+        };
 
         public void setNewDelegate(IndexEventListener listener) {
-            delegate = listener == null ? new IndexEventListener() {} : listener;
+            delegate = listener == null ? new IndexEventListener() {
+            } : listener;
         }
 
         @Override
@@ -109,13 +102,13 @@ public final class MockIndexEventListener {
         }
 
         @Override
-        public void indexShardStateChanged(IndexShard indexShard, @Nullable IndexShardState previousState, IndexShardState currentState, @Nullable String reason) {
+        public void indexShardStateChanged(
+            IndexShard indexShard,
+            @Nullable IndexShardState previousState,
+            IndexShardState currentState,
+            @Nullable String reason
+        ) {
             delegate.indexShardStateChanged(indexShard, previousState, currentState, reason);
-        }
-
-        @Override
-        public void onShardInactive(IndexShard indexShard) {
-            delegate.onShardInactive(indexShard);
         }
 
         @Override
@@ -129,8 +122,8 @@ public final class MockIndexEventListener {
         }
 
         @Override
-        public void beforeIndexShardCreated(ShardId shardId, Settings indexSettings) {
-            delegate.beforeIndexShardCreated(shardId, indexSettings);
+        public void beforeIndexShardCreated(ShardRouting shardrouting, Settings indexSettings) {
+            delegate.beforeIndexShardCreated(shardrouting, indexSettings);
         }
 
         @Override

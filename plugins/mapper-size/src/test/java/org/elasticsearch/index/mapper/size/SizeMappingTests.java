@@ -1,118 +1,108 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.index.mapper.size;
 
-import java.util.Collection;
-
-import org.elasticsearch.Version;
-import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.compress.CompressedXContent;
-import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.xcontent.XContentFactory;
-import org.elasticsearch.common.xcontent.XContentType;
-import org.elasticsearch.index.IndexService;
-import org.elasticsearch.index.mapper.MapperService;
-import org.elasticsearch.index.mapper.NumberFieldMapper;
+import org.apache.lucene.index.IndexableField;
 import org.elasticsearch.index.mapper.DocumentMapper;
+import org.elasticsearch.index.mapper.MapperService;
+import org.elasticsearch.index.mapper.MetadataMapperTestCase;
 import org.elasticsearch.index.mapper.ParsedDocument;
-import org.elasticsearch.index.mapper.SourceToParse;
-import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.plugin.mapper.MapperSizePlugin;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.test.ESSingleNodeTestCase;
-import org.elasticsearch.test.InternalSettingsPlugin;
+import org.elasticsearch.xcontent.XContentBuilder;
 
-import static org.hamcrest.Matchers.is;
+import java.io.IOException;
+import java.util.Collection;
+import java.util.Collections;
+
 import static org.hamcrest.Matchers.nullValue;
-import static org.hamcrest.Matchers.instanceOf;
 
-import org.apache.lucene.index.IndexableField;
+public class SizeMappingTests extends MetadataMapperTestCase {
 
-public class SizeMappingTests extends ESSingleNodeTestCase {
     @Override
-    protected Collection<Class<? extends Plugin>> getPlugins() {
-        return pluginList(MapperSizePlugin.class, InternalSettingsPlugin.class);
+    protected Collection<? extends Plugin> getPlugins() {
+        return Collections.singletonList(new MapperSizePlugin());
+    }
+
+    private static void enabled(XContentBuilder b) throws IOException {
+        b.startObject(SizeFieldMapper.NAME);
+        b.field("enabled", true);
+        b.endObject();
+    }
+
+    private static void disabled(XContentBuilder b) throws IOException {
+        b.startObject(SizeFieldMapper.NAME);
+        b.field("enabled", false);
+        b.endObject();
     }
 
     public void testSizeEnabled() throws Exception {
-        IndexService service = createIndex("test", Settings.EMPTY, "type", "_size", "enabled=true");
-        DocumentMapper docMapper = service.mapperService().documentMapper("type");
+        DocumentMapper docMapper = createDocumentMapper(topMapping(SizeMappingTests::enabled));
 
-        BytesReference source = XContentFactory.jsonBuilder()
-            .startObject()
-            .field("field", "value")
-            .endObject()
-            .bytes();
-        ParsedDocument doc = docMapper.parse(SourceToParse.source("test", "type", "1", source, XContentType.JSON));
+        ParsedDocument doc = docMapper.parse(source(b -> b.field("field", "value")));
 
         boolean stored = false;
         boolean points = false;
         for (IndexableField field : doc.rootDoc().getFields("_size")) {
             stored |= field.fieldType().stored();
-            points |= field.fieldType().pointDimensionCount() > 0;
+            points |= field.fieldType().pointIndexDimensionCount() > 0;
         }
         assertTrue(stored);
         assertTrue(points);
     }
 
     public void testSizeDisabled() throws Exception {
-        IndexService service = createIndex("test", Settings.EMPTY, "type", "_size", "enabled=false");
-        DocumentMapper docMapper = service.mapperService().documentMapper("type");
-
-        BytesReference source = XContentFactory.jsonBuilder()
-            .startObject()
-            .field("field", "value")
-            .endObject()
-            .bytes();
-        ParsedDocument doc = docMapper.parse(SourceToParse.source("test", "type", "1", source, XContentType.JSON));
+        DocumentMapper docMapper = createDocumentMapper(topMapping(SizeMappingTests::disabled));
+        ParsedDocument doc = docMapper.parse(source(b -> b.field("field", "value")));
 
         assertThat(doc.rootDoc().getField("_size"), nullValue());
     }
 
     public void testSizeNotSet() throws Exception {
-        IndexService service = createIndex("test", Settings.EMPTY, "type");
-        DocumentMapper docMapper = service.mapperService().documentMapper("type");
-
-        BytesReference source = XContentFactory.jsonBuilder()
-            .startObject()
-            .field("field", "value")
-            .endObject()
-            .bytes();
-        ParsedDocument doc = docMapper.parse(SourceToParse.source("test", "type", "1", source, XContentType.JSON));
+        DocumentMapper docMapper = createDocumentMapper(topMapping(b -> {}));
+        ParsedDocument doc = docMapper.parse(source(b -> b.field("field", "value")));
 
         assertThat(doc.rootDoc().getField("_size"), nullValue());
     }
 
     public void testThatDisablingWorksWhenMerging() throws Exception {
-        IndexService service = createIndex("test", Settings.EMPTY, "type", "_size", "enabled=true");
-        DocumentMapper docMapper = service.mapperService().documentMapper("type");
-        assertThat(docMapper.metadataMapper(SizeFieldMapper.class).enabled(), is(true));
+        MapperService mapperService = createMapperService(topMapping(SizeMappingTests::enabled));
+        ParsedDocument doc = mapperService.documentMapper().parse(source(b -> b.field("field", "value")));
+        assertNotNull(doc.rootDoc().getField(SizeFieldMapper.NAME));
 
-        String disabledMapping = XContentFactory.jsonBuilder().startObject().startObject("type")
-            .startObject("_size").field("enabled", false).endObject()
-            .endObject().endObject().string();
-        docMapper = service.mapperService().merge("type", new CompressedXContent(disabledMapping),
-            MapperService.MergeReason.MAPPING_UPDATE, false);
-
-        assertThat(docMapper.metadataMapper(SizeFieldMapper.class).enabled(), is(false));
+        merge(mapperService, topMapping(SizeMappingTests::disabled));
+        doc = mapperService.documentMapper().parse(source(b -> b.field("field", "value")));
+        assertNull(doc.rootDoc().getField(SizeFieldMapper.NAME));
     }
 
+    @Override
+    protected String fieldName() {
+        return SizeFieldMapper.NAME;
+    }
+
+    @Override
+    protected boolean isConfigurable() {
+        return true;
+    }
+
+    @Override
+    protected void registerParameters(ParameterChecker checker) throws IOException {
+        checker.registerUpdateCheck(
+            topMapping(SizeMappingTests::disabled),
+            topMapping(SizeMappingTests::enabled),
+            dm -> assertTrue(dm.metadataMapper(SizeFieldMapper.class).enabled())
+        );
+        checker.registerUpdateCheck(
+            topMapping(SizeMappingTests::enabled),
+            topMapping(SizeMappingTests::disabled),
+            dm -> assertFalse(dm.metadataMapper(SizeFieldMapper.class).enabled())
+        );
+    }
 }

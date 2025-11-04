@@ -1,20 +1,10 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 package org.elasticsearch.repositories.hdfs;
 
@@ -36,21 +26,22 @@ final class HdfsBlobStore implements BlobStore {
     private final HdfsSecurityContext securityContext;
     private final int bufferSize;
     private final boolean readOnly;
+    private final Short replicationFactor;
     private volatile boolean closed;
 
     HdfsBlobStore(FileContext fileContext, String path, int bufferSize, boolean readOnly) throws IOException {
-        this(fileContext, path, bufferSize, readOnly, false);
+        this(fileContext, path, bufferSize, readOnly, false, null);
     }
 
-    HdfsBlobStore(FileContext fileContext, String path, int bufferSize, boolean readOnly, boolean haEnabled) throws IOException {
+    HdfsBlobStore(FileContext fileContext, String path, int bufferSize, boolean readOnly, boolean haEnabled, Short replicationFactor)
+        throws IOException {
         this.fileContext = fileContext;
-        // Only restrict permissions if not running with HA
-        boolean restrictPermissions = (haEnabled == false);
-        this.securityContext = new HdfsSecurityContext(fileContext.getUgi(), restrictPermissions);
+        this.securityContext = new HdfsSecurityContext(fileContext.getUgi());
         this.bufferSize = bufferSize;
+        this.replicationFactor = replicationFactor;
         this.root = execute(fileContext1 -> fileContext1.makeQualified(new Path(path)));
         this.readOnly = readOnly;
-        if (!readOnly) {
+        if (readOnly == false) {
             try {
                 mkdirs(root);
             } catch (FileAlreadyExistsException ok) {
@@ -59,17 +50,10 @@ final class HdfsBlobStore implements BlobStore {
         }
     }
 
+    @SuppressWarnings("HiddenField")
     private void mkdirs(Path path) throws IOException {
         execute((Operation<Void>) fileContext -> {
             fileContext.mkdir(path, null, true);
-            return null;
-        });
-    }
-
-    @Override
-    public void delete(BlobPath path) throws IOException {
-        execute((Operation<Void>) fc -> {
-            fc.delete(translateToHdfsPath(path), true);
             return null;
         });
     }
@@ -81,12 +65,12 @@ final class HdfsBlobStore implements BlobStore {
 
     @Override
     public BlobContainer blobContainer(BlobPath path) {
-        return new HdfsBlobContainer(path, this, buildHdfsPath(path), bufferSize, securityContext);
+        return new HdfsBlobContainer(path, this, buildHdfsPath(path), bufferSize, securityContext, replicationFactor);
     }
 
     private Path buildHdfsPath(BlobPath blobPath) {
         final Path path = translateToHdfsPath(blobPath);
-        if (!readOnly) {
+        if (readOnly == false) {
             try {
                 mkdirs(path);
             } catch (FileAlreadyExistsException ok) {
@@ -100,7 +84,7 @@ final class HdfsBlobStore implements BlobStore {
 
     private Path translateToHdfsPath(BlobPath blobPath) {
         Path path = root;
-        for (String p : blobPath) {
+        for (String p : blobPath.parts()) {
             path = new Path(path, p);
         }
         return path;
@@ -117,10 +101,8 @@ final class HdfsBlobStore implements BlobStore {
         if (closed) {
             throw new AlreadyClosedException("HdfsBlobStore is closed: " + this);
         }
-        return securityContext.doPrivilegedOrThrow(() -> {
-            securityContext.ensureLogin();
-            return operation.run(fileContext);
-        });
+        securityContext.ensureLogin();
+        return operation.run(fileContext);
     }
 
     @Override

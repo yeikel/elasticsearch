@@ -1,72 +1,87 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.ingest.common;
 
+import org.elasticsearch.cluster.project.TestProjectResolvers;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.ingest.IngestDocument;
+import org.elasticsearch.ingest.RandomDocumentPicks;
+import org.elasticsearch.script.IngestScript;
+import org.elasticsearch.script.MockScriptEngine;
+import org.elasticsearch.script.Script;
+import org.elasticsearch.script.ScriptModule;
+import org.elasticsearch.script.ScriptService;
+import org.elasticsearch.script.ScriptType;
+import org.elasticsearch.test.ESTestCase;
+import org.junit.Before;
+
 import java.util.HashMap;
 import java.util.Map;
 
-import org.elasticsearch.ingest.IngestDocument;
-import org.elasticsearch.ingest.RandomDocumentPicks;
-import org.elasticsearch.script.ExecutableScript;
-import org.elasticsearch.script.Script;
-import org.elasticsearch.script.ScriptService;
-import org.elasticsearch.test.ESTestCase;
-
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
-import static org.hamcrest.core.Is.is;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.is;
 
 public class ScriptProcessorTests extends ESTestCase {
 
-    public void testScripting() throws Exception {
-        int randomBytesIn = randomInt();
-        int randomBytesOut = randomInt();
-        int randomBytesTotal = randomBytesIn + randomBytesOut;
+    private ScriptService scriptService;
+    private Script script;
+    private IngestScript.Factory ingestScriptFactory;
 
-        ScriptService scriptService = mock(ScriptService.class);
-        Script script = mockScript("_script");
-        ExecutableScript.Factory factory = mock(ExecutableScript.Factory.class);
-        ExecutableScript executableScript = mock(ExecutableScript.class);
-        when(scriptService.compile(script, ExecutableScript.INGEST_CONTEXT)).thenReturn(factory);
-        when(factory.newInstance(any())).thenReturn(executableScript);
+    @Before
+    public void setupScripting() {
+        String scriptName = "script";
+        scriptService = new ScriptService(
+            Settings.builder().build(),
+            Map.of(Script.DEFAULT_SCRIPT_LANG, new MockScriptEngine(Script.DEFAULT_SCRIPT_LANG, Map.of(scriptName, ctx -> {
+                Integer bytesIn = (Integer) ctx.get("bytes_in");
+                Integer bytesOut = (Integer) ctx.get("bytes_out");
+                ctx.put("bytes_total", bytesIn + bytesOut);
+                ctx.put("_dynamic_templates", Map.of("foo", "bar"));
+                return null;
+            }), Map.of())),
+            new HashMap<>(ScriptModule.CORE_CONTEXTS),
+            () -> 1L,
+            TestProjectResolvers.singleProject(randomProjectIdOrDefault())
+        );
+        script = new Script(ScriptType.INLINE, Script.DEFAULT_SCRIPT_LANG, scriptName, Map.of());
+        ingestScriptFactory = scriptService.compile(script, IngestScript.CONTEXT);
+    }
 
+    public void testScriptingWithoutPrecompiledScriptFactory() throws Exception {
+        ScriptProcessor processor = new ScriptProcessor(randomAlphaOfLength(10), null, script, null, scriptService);
+        IngestDocument ingestDocument = randomDocument();
+        processor.execute(ingestDocument);
+        assertIngestDocument(ingestDocument);
+    }
+
+    public void testScriptingWithPrecompiledIngestScript() {
+        ScriptProcessor processor = new ScriptProcessor(randomAlphaOfLength(10), null, script, ingestScriptFactory, scriptService);
+        IngestDocument ingestDocument = randomDocument();
+        processor.execute(ingestDocument);
+        assertIngestDocument(ingestDocument);
+    }
+
+    private IngestDocument randomDocument() {
         Map<String, Object> document = new HashMap<>();
         document.put("bytes_in", randomInt());
         document.put("bytes_out", randomInt());
-        IngestDocument ingestDocument = RandomDocumentPicks.randomIngestDocument(random(), document);
+        return RandomDocumentPicks.randomIngestDocument(random(), document);
+    }
 
-        doAnswer(invocationOnMock ->  {
-            ingestDocument.setFieldValue("bytes_total", randomBytesTotal);
-            return null;
-        }).when(executableScript).run();
-
-        ScriptProcessor processor = new ScriptProcessor(randomAlphaOfLength(10), script, scriptService);
-
-        processor.execute(ingestDocument);
-
+    private void assertIngestDocument(IngestDocument ingestDocument) {
         assertThat(ingestDocument.getSourceAndMetadata(), hasKey("bytes_in"));
         assertThat(ingestDocument.getSourceAndMetadata(), hasKey("bytes_out"));
         assertThat(ingestDocument.getSourceAndMetadata(), hasKey("bytes_total"));
-        assertThat(ingestDocument.getSourceAndMetadata().get("bytes_total"), is(randomBytesTotal));
+        int bytesTotal = ingestDocument.getFieldValue("bytes_in", Integer.class) + ingestDocument.getFieldValue("bytes_out", Integer.class);
+        assertThat(ingestDocument.getSourceAndMetadata().get("bytes_total"), is(bytesTotal));
+        assertThat(ingestDocument.getSourceAndMetadata().get("_dynamic_templates"), equalTo(Map.of("foo", "bar")));
     }
 }

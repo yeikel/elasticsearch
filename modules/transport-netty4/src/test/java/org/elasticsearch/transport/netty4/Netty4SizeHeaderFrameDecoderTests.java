@@ -1,36 +1,28 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.transport.netty4;
 
+import org.elasticsearch.TransportVersion;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
-import org.elasticsearch.common.util.BigArrays;
-import org.elasticsearch.common.util.MockBigArrays;
 import org.elasticsearch.common.util.MockPageCacheRecycler;
+import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.mocksocket.MockSocket;
+import org.elasticsearch.telemetry.metric.MeterRegistry;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.threadpool.DefaultBuiltInExecutorBuilders;
 import org.elasticsearch.threadpool.ThreadPool;
-import org.elasticsearch.transport.TcpTransport;
+import org.elasticsearch.transport.TransportSettings;
 import org.junit.After;
 import org.junit.Before;
 
@@ -44,15 +36,15 @@ import java.util.Collections;
 import static org.hamcrest.Matchers.is;
 
 /**
- * This test checks, if a HTTP look-alike request (starting with a HTTP method and a space)
+ * This test checks, if an HTTP look-alike request (starting with an HTTP method and a space)
  * actually returns text response instead of just dropping the connection
  */
 public class Netty4SizeHeaderFrameDecoderTests extends ESTestCase {
 
     private final Settings settings = Settings.builder()
         .put("node.name", "NettySizeHeaderFrameDecoderTests")
-        .put(TcpTransport.BIND_HOST.getKey(), "127.0.0.1")
-        .put(TcpTransport.PORT.getKey(), "0")
+        .put(TransportSettings.BIND_HOST.getKey(), "127.0.0.1")
+        .put(TransportSettings.PORT.getKey(), "0")
         .build();
 
     private ThreadPool threadPool;
@@ -62,15 +54,23 @@ public class Netty4SizeHeaderFrameDecoderTests extends ESTestCase {
 
     @Before
     public void startThreadPool() {
-        threadPool = new ThreadPool(settings);
+        threadPool = new ThreadPool(settings, MeterRegistry.NOOP, new DefaultBuiltInExecutorBuilders());
         NetworkService networkService = new NetworkService(Collections.emptyList());
-        BigArrays bigArrays = new MockBigArrays(new MockPageCacheRecycler(Settings.EMPTY), new NoneCircuitBreakerService());
-        nettyTransport = new Netty4Transport(settings, threadPool, networkService, bigArrays,
-            new NamedWriteableRegistry(Collections.emptyList()), new NoneCircuitBreakerService());
+        PageCacheRecycler recycler = new MockPageCacheRecycler(Settings.EMPTY);
+        nettyTransport = new Netty4Transport(
+            settings,
+            TransportVersion.current(),
+            threadPool,
+            networkService,
+            recycler,
+            new NamedWriteableRegistry(Collections.emptyList()),
+            new NoneCircuitBreakerService(),
+            new SharedGroupFactory(settings)
+        );
         nettyTransport.start();
 
         TransportAddress[] boundAddresses = nettyTransport.boundAddress().boundAddresses();
-        TransportAddress transportAddress = (TransportAddress) randomFrom(boundAddresses);
+        TransportAddress transportAddress = randomFrom(boundAddresses);
         port = transportAddress.address().getPort();
         host = transportAddress.address().getAddress();
     }
@@ -91,7 +91,7 @@ public class Netty4SizeHeaderFrameDecoderTests extends ESTestCase {
             socket.getOutputStream().flush();
 
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
-                assertThat(reader.readLine(), is("This is not a HTTP port"));
+                assertThat(reader.readLine(), is("This is not an HTTP port"));
             }
         }
     }

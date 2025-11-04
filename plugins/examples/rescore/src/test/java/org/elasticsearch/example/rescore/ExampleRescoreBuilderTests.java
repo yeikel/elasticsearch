@@ -1,26 +1,17 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.example.rescore;
 
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.TotalHits;
 import org.elasticsearch.common.io.stream.Writeable.Reader;
 import org.elasticsearch.search.rescore.RescoreContext;
 import org.elasticsearch.test.AbstractWireSerializingTestCase;
@@ -68,7 +59,7 @@ public class ExampleRescoreBuilderTests extends AbstractWireSerializingTestCase<
         String fieldFactor = null;
         ExampleRescoreBuilder builder = new ExampleRescoreBuilder(factor, fieldFactor).windowSize(2);
         RescoreContext context = builder.buildContext(null);
-        TopDocs docs = new TopDocs(10, new ScoreDoc[3], 0);
+        TopDocs docs = new TopDocs(new TotalHits(10, TotalHits.Relation.EQUAL_TO), new ScoreDoc[3]);
         docs.scoreDocs[0] = new ScoreDoc(0, 1.0f);
         docs.scoreDocs[1] = new ScoreDoc(1, 1.0f);
         docs.scoreDocs[2] = new ScoreDoc(2, 1.0f);

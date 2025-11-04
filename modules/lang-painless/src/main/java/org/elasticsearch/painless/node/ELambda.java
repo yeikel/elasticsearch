@@ -1,45 +1,20 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.AnalyzerCaster;
-import org.elasticsearch.painless.Definition;
-import org.elasticsearch.painless.Definition.Method;
-import org.elasticsearch.painless.Definition.Type;
-import org.elasticsearch.painless.FunctionRef;
-import org.elasticsearch.painless.Globals;
-import org.elasticsearch.painless.Locals;
-import org.elasticsearch.painless.Locals.Variable;
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.MethodWriter;
-import org.elasticsearch.painless.node.SFunction.FunctionReserved;
-import org.objectweb.asm.Opcodes;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
 
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
-
-import static org.elasticsearch.painless.WriterConstants.LAMBDA_BOOTSTRAP_HANDLE;
 
 /**
  * Lambda expression node.
@@ -64,195 +39,46 @@ import static org.elasticsearch.painless.WriterConstants.LAMBDA_BOOTSTRAP_HANDLE
  * <br>
  * {@code sort(list, lambda$0(capture))}
  */
-public final class ELambda extends AExpression implements ILambda {
+public class ELambda extends AExpression {
 
-    private final String name;
-    private final FunctionReserved reserved;
-    private final List<String> paramTypeStrs;
-    private final List<String> paramNameStrs;
-    private final List<AStatement> statements;
+    private final List<String> canonicalTypeNameParameters;
+    private final List<String> parameterNames;
+    private final SBlock blockNode;
 
-    // desugared synthetic method (lambda body)
-    private SFunction desugared;
-    // captured variables
-    private List<Variable> captures;
-    // static parent, static lambda
-    private FunctionRef ref;
-    // dynamic parent, deferred until link time
-    private String defPointer;
+    public ELambda(
+        int identifier,
+        Location location,
+        List<String> canonicalTypeNameParameters,
+        List<String> parameterNames,
+        SBlock blockNode
+    ) {
 
-    public ELambda(String name, FunctionReserved reserved,
-                   Location location, List<String> paramTypes, List<String> paramNames,
-                   List<AStatement> statements) {
-        super(location);
-        this.name = Objects.requireNonNull(name);
-        this.reserved = Objects.requireNonNull(reserved);
-        this.paramTypeStrs = Collections.unmodifiableList(paramTypes);
-        this.paramNameStrs = Collections.unmodifiableList(paramNames);
-        this.statements = Collections.unmodifiableList(statements);
+        super(identifier, location);
+
+        this.canonicalTypeNameParameters = Collections.unmodifiableList(Objects.requireNonNull(canonicalTypeNameParameters));
+        this.parameterNames = Collections.unmodifiableList(Objects.requireNonNull(parameterNames));
+        this.blockNode = Objects.requireNonNull(blockNode);
+    }
+
+    public List<String> getCanonicalTypeNameParameters() {
+        return canonicalTypeNameParameters;
+    }
+
+    public List<String> getParameterNames() {
+        return parameterNames;
+    }
+
+    public SBlock getBlockNode() {
+        return blockNode;
     }
 
     @Override
-    void extractVariables(Set<String> variables) {
-        for (AStatement statement : statements) {
-            statement.extractVariables(variables);
-        }
+    public <Scope> void visit(UserTreeVisitor<Scope> userTreeVisitor, Scope scope) {
+        userTreeVisitor.visitLambda(this, scope);
     }
 
     @Override
-    void analyze(Locals locals) {
-        final Type returnType;
-        final List<String> actualParamTypeStrs;
-        Method interfaceMethod;
-        // inspect the target first, set interface method if we know it.
-        if (expected == null) {
-            interfaceMethod = null;
-            // we don't know anything: treat as def
-            returnType = locals.getDefinition().DefType;
-            // don't infer any types, replace any null types with def
-            actualParamTypeStrs = new ArrayList<>(paramTypeStrs.size());
-            for (String type : paramTypeStrs) {
-                if (type == null) {
-                    actualParamTypeStrs.add("def");
-                } else {
-                    actualParamTypeStrs.add(type);
-                }
-            }
-        } else {
-            // we know the method statically, infer return type and any unknown/def types
-            interfaceMethod = expected.struct.getFunctionalMethod();
-            if (interfaceMethod == null) {
-                throw createError(new IllegalArgumentException("Cannot pass lambda to [" + expected.name +
-                                                               "], not a functional interface"));
-            }
-            // check arity before we manipulate parameters
-            if (interfaceMethod.arguments.size() != paramTypeStrs.size())
-                throw new IllegalArgumentException("Incorrect number of parameters for [" + interfaceMethod.name +
-                                                   "] in [" + expected.clazz + "]");
-            // for method invocation, its allowed to ignore the return value
-            if (interfaceMethod.rtn.equals(locals.getDefinition().voidType)) {
-                returnType = locals.getDefinition().DefType;
-            } else {
-                returnType = interfaceMethod.rtn;
-            }
-            // replace any null types with the actual type
-            actualParamTypeStrs = new ArrayList<>(paramTypeStrs.size());
-            for (int i = 0; i < paramTypeStrs.size(); i++) {
-                String paramType = paramTypeStrs.get(i);
-                if (paramType == null) {
-                    actualParamTypeStrs.add(interfaceMethod.arguments.get(i).name);
-                } else {
-                    actualParamTypeStrs.add(paramType);
-                }
-            }
-        }
-        // gather any variables used by the lambda body first.
-        Set<String> variables = new HashSet<>();
-        for (AStatement statement : statements) {
-            statement.extractVariables(variables);
-        }
-        // any of those variables defined in our scope need to be captured
-        captures = new ArrayList<>();
-        for (String variable : variables) {
-            if (locals.hasVariable(variable)) {
-                captures.add(locals.getVariable(location, variable));
-            }
-        }
-        // prepend capture list to lambda's arguments
-        List<String> paramTypes = new ArrayList<>(captures.size() + actualParamTypeStrs.size());
-        List<String> paramNames = new ArrayList<>(captures.size() + paramNameStrs.size());
-        for (Variable var : captures) {
-            paramTypes.add(var.type.name);
-            paramNames.add(var.name);
-        }
-        paramTypes.addAll(actualParamTypeStrs);
-        paramNames.addAll(paramNameStrs);
-
-        // desugar lambda body into a synthetic method
-        desugared = new SFunction(reserved, location, returnType.name, name,
-                                            paramTypes, paramNames, statements, true);
-        desugared.generateSignature(locals.getDefinition());
-        desugared.analyze(Locals.newLambdaScope(locals.getProgramScope(), returnType, desugared.parameters,
-                                                captures.size(), reserved.getMaxLoopCounter()));
-
-        // setup method reference to synthetic method
-        if (expected == null) {
-            ref = null;
-            actual = locals.getDefinition().getType("String");
-            defPointer = "Sthis." + name + "," + captures.size();
-        } else {
-            defPointer = null;
-            try {
-                ref = new FunctionRef(expected, interfaceMethod, desugared.method, captures.size());
-            } catch (IllegalArgumentException e) {
-                throw createError(e);
-            }
-
-            // check casts between the interface method and the delegate method are legal
-            for (int i = 0; i < interfaceMethod.arguments.size(); ++i) {
-                Type from = interfaceMethod.arguments.get(i);
-                Type to = desugared.parameters.get(i + captures.size()).type;
-                locals.getDefinition().caster.getLegalCast(location, from, to, false, true);
-            }
-
-            if (interfaceMethod.rtn.equals(locals.getDefinition().voidType) == false) {
-                locals.getDefinition().caster.getLegalCast(location, desugared.rtnType, interfaceMethod.rtn, false, true);
-            }
-
-            actual = expected;
-        }
-    }
-
-    @Override
-    void write(MethodWriter writer, Globals globals) {
-        writer.writeDebugInfo(location);
-
-        if (ref != null) {
-            writer.writeDebugInfo(location);
-            // load captures
-            for (Variable capture : captures) {
-                writer.visitVarInsn(capture.type.type.getOpcode(Opcodes.ILOAD), capture.getSlot());
-            }
-
-            writer.invokeDynamic(
-                ref.interfaceMethodName,
-                ref.factoryDescriptor,
-                LAMBDA_BOOTSTRAP_HANDLE,
-                ref.interfaceType,
-                ref.delegateClassName,
-                ref.delegateInvokeType,
-                ref.delegateMethodName,
-                ref.delegateType
-            );
-        } else {
-            // placeholder
-            writer.push((String)null);
-            // load captures
-            for (Variable capture : captures) {
-                writer.visitVarInsn(capture.type.type.getOpcode(Opcodes.ILOAD), capture.getSlot());
-            }
-        }
-
-        // add synthetic method to the queue to be written
-        globals.addSyntheticMethod(desugared);
-    }
-
-    @Override
-    public String getPointer() {
-        return defPointer;
-    }
-
-    @Override
-    public org.objectweb.asm.Type[] getCaptures() {
-        org.objectweb.asm.Type[] types = new org.objectweb.asm.Type[captures.size()];
-        for (int i = 0; i < types.length; i++) {
-            types[i] = captures.get(i).type.type;
-        }
-        return types;
-    }
-
-    @Override
-    public String toString() {
-        return multilineToString(pairwiseToString(paramTypeStrs, paramNameStrs), statements);
+    public <Scope> void visitChildren(UserTreeVisitor<Scope> userTreeVisitor, Scope scope) {
+        blockNode.visit(userTreeVisitor, scope);
     }
 }

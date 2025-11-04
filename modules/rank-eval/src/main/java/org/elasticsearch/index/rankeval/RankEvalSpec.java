@@ -1,36 +1,27 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.index.rankeval;
 
-import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
-import org.elasticsearch.common.xcontent.ConstructingObjectParser;
-import org.elasticsearch.common.xcontent.ToXContentObject;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentParserUtils;
+import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.script.Script;
+import org.elasticsearch.xcontent.ConstructingObjectParser;
+import org.elasticsearch.xcontent.ParseField;
+import org.elasticsearch.xcontent.ToXContentObject;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -41,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
  * Specification of the ranking evaluation request.<br>
@@ -57,22 +49,24 @@ public class RankEvalSpec implements Writeable, ToXContentObject {
     /** Default max number of requests. */
     private static final int MAX_CONCURRENT_SEARCHES = 10;
     /** optional: Templates to base test requests on */
-    private Map<String, Script> templates = new HashMap<>();
-    /** the indices this ranking evaluation targets */
-    private final List<String> indices;
+    private final Map<String, Script> templates = new HashMap<>();
 
     public RankEvalSpec(List<RatedRequest> ratedRequests, EvaluationMetric metric, Collection<ScriptWithId> templates) {
         this.metric = Objects.requireNonNull(metric, "Cannot evaluate ranking if no evaluation metric is provided.");
         if (ratedRequests == null || ratedRequests.isEmpty()) {
             throw new IllegalArgumentException(
-                    "Cannot evaluate ranking if no search requests with rated results are provided. Seen: " + ratedRequests);
+                "Cannot evaluate ranking if no search requests with rated results are provided. Seen: " + ratedRequests
+            );
         }
         this.ratedRequests = ratedRequests;
         if (templates == null || templates.isEmpty()) {
             for (RatedRequest request : ratedRequests) {
-                if (request.getTestRequest() == null) {
-                    throw new IllegalStateException("Cannot evaluate ranking if neither template nor test request is "
-                            + "provided. Seen for request id: " + request.getId());
+                if (request.getEvaluationRequest() == null) {
+                    throw new IllegalStateException(
+                        "Cannot evaluate ranking if neither template nor evaluation request is "
+                            + "provided. Seen for request id: "
+                            + request.getId()
+                    );
                 }
             }
         }
@@ -81,7 +75,6 @@ public class RankEvalSpec implements Writeable, ToXContentObject {
                 this.templates.put(idScript.id, idScript.script);
             }
         }
-        this.indices = new ArrayList<>();
     }
 
     public RankEvalSpec(List<RatedRequest> ratedRequests, EvaluationMetric metric) {
@@ -102,30 +95,14 @@ public class RankEvalSpec implements Writeable, ToXContentObject {
             this.templates.put(key, value);
         }
         maxConcurrentSearches = in.readVInt();
-        int indicesSize = in.readInt();
-        indices = new ArrayList<>(indicesSize);
-        for (int i = 0; i < indicesSize; i++) {
-            this.indices.add(in.readString());
-        }
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeVInt(ratedRequests.size());
-        for (RatedRequest spec : ratedRequests) {
-            spec.writeTo(out);
-        }
+        out.writeCollection(ratedRequests);
         out.writeNamedWriteable(metric);
-        out.writeVInt(templates.size());
-        for (Entry<String, Script> entry : templates.entrySet()) {
-            out.writeString(entry.getKey());
-            entry.getValue().writeTo(out);
-        }
+        out.writeMap(templates, StreamOutput::writeWriteable);
         out.writeVInt(maxConcurrentSearches);
-        out.writeInt(indices.size());
-        for (String index : indices) {
-            out.writeString(index);
-        }
     }
 
     /** Returns the metric to use for quality evaluation.*/
@@ -153,40 +130,37 @@ public class RankEvalSpec implements Writeable, ToXContentObject {
         this.maxConcurrentSearches = maxConcurrentSearches;
     }
 
-    public void addIndices(List<String> indices) {
-        this.indices.addAll(indices);
-    }
-
-    public List<String> getIndices() {
-        return Collections.unmodifiableList(indices);
-    }
-
     private static final ParseField TEMPLATES_FIELD = new ParseField("templates");
     private static final ParseField METRIC_FIELD = new ParseField("metric");
     private static final ParseField REQUESTS_FIELD = new ParseField("requests");
     private static final ParseField MAX_CONCURRENT_SEARCHES_FIELD = new ParseField("max_concurrent_searches");
     @SuppressWarnings("unchecked")
-    private static final ConstructingObjectParser<RankEvalSpec, Void> PARSER = new ConstructingObjectParser<>("rank_eval",
-            a -> new RankEvalSpec((List<RatedRequest>) a[0], (EvaluationMetric) a[1], (Collection<ScriptWithId>) a[2]));
+    private static final ConstructingObjectParser<RankEvalSpec, Predicate<NodeFeature>> PARSER = new ConstructingObjectParser<>(
+        "rank_eval",
+        a -> new RankEvalSpec((List<RatedRequest>) a[0], (EvaluationMetric) a[1], (Collection<ScriptWithId>) a[2])
+    );
 
     static {
-        PARSER.declareObjectArray(ConstructingObjectParser.constructorArg(), (p, c) -> RatedRequest.fromXContent(p), REQUESTS_FIELD);
+        PARSER.declareObjectArray(ConstructingObjectParser.constructorArg(), (p, c) -> RatedRequest.fromXContent(p, c), REQUESTS_FIELD);
         PARSER.declareObject(ConstructingObjectParser.constructorArg(), (p, c) -> parseMetric(p), METRIC_FIELD);
-        PARSER.declareObjectArray(ConstructingObjectParser.optionalConstructorArg(), (p, c) -> ScriptWithId.fromXContent(p),
-                TEMPLATES_FIELD);
+        PARSER.declareObjectArray(
+            ConstructingObjectParser.optionalConstructorArg(),
+            (p, c) -> ScriptWithId.fromXContent(p),
+            TEMPLATES_FIELD
+        );
         PARSER.declareInt(RankEvalSpec::setMaxConcurrentSearches, MAX_CONCURRENT_SEARCHES_FIELD);
     }
 
     private static EvaluationMetric parseMetric(XContentParser parser) throws IOException {
-        XContentParserUtils.ensureExpectedToken(XContentParser.Token.START_OBJECT, parser.currentToken(), parser::getTokenLocation);
-        XContentParserUtils.ensureExpectedToken(XContentParser.Token.FIELD_NAME, parser.nextToken(), parser::getTokenLocation);
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.START_OBJECT, parser.currentToken(), parser);
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.FIELD_NAME, parser.nextToken(), parser);
         EvaluationMetric metric = parser.namedObject(EvaluationMetric.class, parser.currentName(), null);
-        XContentParserUtils.ensureExpectedToken(XContentParser.Token.END_OBJECT, parser.nextToken(), parser::getTokenLocation);
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.END_OBJECT, parser.nextToken(), parser);
         return metric;
     }
 
-    public static RankEvalSpec parse(XContentParser parser) {
-        return PARSER.apply(parser, null);
+    public static RankEvalSpec parse(XContentParser parser, Predicate<NodeFeature> clusterSupportsFeature) {
+        return PARSER.apply(parser, clusterSupportsFeature);
     }
 
     static class ScriptWithId {
@@ -201,9 +175,10 @@ public class RankEvalSpec implements Writeable, ToXContentObject {
             this.script = script;
         }
 
-        private static final ConstructingObjectParser<ScriptWithId, Void> PARSER =
-                new ConstructingObjectParser<>("script_with_id",
-                        a -> new ScriptWithId((String) a[0], (Script) a[1]));
+        private static final ConstructingObjectParser<ScriptWithId, Void> PARSER = new ConstructingObjectParser<>(
+            "script_with_id",
+            a -> new ScriptWithId((String) a[0], (Script) a[1])
+        );
 
         public static ScriptWithId fromXContent(XContentParser parser) {
             return PARSER.apply(parser, null);
@@ -259,15 +234,14 @@ public class RankEvalSpec implements Writeable, ToXContentObject {
         }
         RankEvalSpec other = (RankEvalSpec) obj;
 
-        return Objects.equals(ratedRequests, other.ratedRequests) &&
-                Objects.equals(metric, other.metric) &&
-                Objects.equals(maxConcurrentSearches, other.maxConcurrentSearches) &&
-                Objects.equals(templates, other.templates) &&
-                Objects.equals(indices, other.indices);
+        return Objects.equals(ratedRequests, other.ratedRequests)
+            && Objects.equals(metric, other.metric)
+            && Objects.equals(maxConcurrentSearches, other.maxConcurrentSearches)
+            && Objects.equals(templates, other.templates);
     }
 
     @Override
     public final int hashCode() {
-        return Objects.hash(ratedRequests, metric, templates, maxConcurrentSearches, indices);
+        return Objects.hash(ratedRequests, metric, templates, maxConcurrentSearches);
     }
 }

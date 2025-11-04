@@ -1,20 +1,10 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.script.mustache;
@@ -22,16 +12,22 @@ package org.elasticsearch.script.mustache;
 import org.elasticsearch.action.ActionResponse;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.xcontent.StatusToXContentObject;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.common.xcontent.ChunkedToXContent;
+import org.elasticsearch.core.AbstractRefCounted;
+import org.elasticsearch.core.RefCounted;
 import org.elasticsearch.rest.RestStatus;
+import org.elasticsearch.transport.LeakTracker;
+import org.elasticsearch.xcontent.ParseField;
+import org.elasticsearch.xcontent.ToXContentObject;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.io.InputStream;
 
-public class SearchTemplateResponse  extends ActionResponse implements StatusToXContentObject {
+public class SearchTemplateResponse extends ActionResponse implements ToXContentObject {
+    public static final ParseField TEMPLATE_OUTPUT_FIELD = new ParseField("template_output");
 
     /** Contains the source of the rendered template **/
     private BytesReference source;
@@ -39,8 +35,16 @@ public class SearchTemplateResponse  extends ActionResponse implements StatusToX
     /** Contains the search response, if any **/
     private SearchResponse response;
 
-    SearchTemplateResponse() {
-    }
+    private final RefCounted refCounted = LeakTracker.wrap(new AbstractRefCounted() {
+        @Override
+        protected void closeInternal() {
+            if (response != null) {
+                response.decRef();
+            }
+        }
+    });
+
+    SearchTemplateResponse() {}
 
     public BytesReference getSource() {
         return source;
@@ -63,33 +67,55 @@ public class SearchTemplateResponse  extends ActionResponse implements StatusToX
     }
 
     @Override
-    public void writeTo(StreamOutput out) throws IOException {
-        super.writeTo(out);
-        out.writeOptionalBytesReference(source);
-        out.writeOptionalStreamable(response);
+    public String toString() {
+        return "SearchTemplateResponse [source=" + source + ", response=" + response + "]";
     }
 
     @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
-        source = in.readOptionalBytesReference();
-        response = in.readOptionalStreamable(SearchResponse::new);
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeOptionalBytesReference(source);
+        out.writeOptionalWriteable(response);
+    }
+
+    @Override
+    public void incRef() {
+        refCounted.incRef();
+    }
+
+    @Override
+    public boolean tryIncRef() {
+        return refCounted.tryIncRef();
+    }
+
+    @Override
+    public boolean decRef() {
+        return refCounted.decRef();
+    }
+
+    @Override
+    public boolean hasReferences() {
+        return refCounted.hasReferences();
     }
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
-        if (hasResponse()) {
-            response.toXContent(builder, params);
-        } else {
-            builder.startObject();
-            //we can assume the template is always json as we convert it before compiling it
-            builder.rawField("template_output", source, XContentType.JSON);
-            builder.endObject();
-        }
+        builder.startObject();
+        innerToXContent(builder, params);
+        builder.endObject();
         return builder;
     }
 
-    @Override
+    void innerToXContent(XContentBuilder builder, Params params) throws IOException {
+        if (hasResponse()) {
+            ChunkedToXContent.wrapAsToXContent(response::innerToXContentChunked).toXContent(builder, params);
+        } else {
+            // we can assume the template is always json as we convert it before compiling it
+            try (InputStream stream = source.streamInput()) {
+                builder.rawField(TEMPLATE_OUTPUT_FIELD.getPreferredName(), stream, XContentType.JSON);
+            }
+        }
+    }
+
     public RestStatus status() {
         if (hasResponse()) {
             return response.status();

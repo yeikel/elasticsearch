@@ -1,135 +1,90 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.script.mustache;
 
-import org.elasticsearch.common.ParsingException;
-import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.common.xcontent.json.JsonXContent;
+import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.script.ScriptType;
-import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.search.RandomSearchRequestGenerator;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.test.AbstractWireSerializingTestCase;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
 
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasEntry;
-import static org.hamcrest.Matchers.hasItems;
-import static org.hamcrest.Matchers.hasKey;
-import static org.hamcrest.Matchers.nullValue;
+public class SearchTemplateRequestTests extends AbstractWireSerializingTestCase<SearchTemplateRequest> {
 
-public class SearchTemplateRequestTests extends ESTestCase {
-
-    public void testParseInlineTemplate() throws Exception {
-        String source = "{" +
-                "    'source' : {\n" +
-                "    'query': {\n" +
-                "      'terms': {\n" +
-                "        'status': [\n" +
-                "          '{{#status}}',\n" +
-                "          '{{.}}',\n" +
-                "          '{{/status}}'\n" +
-                "        ]\n" +
-                "      }\n" +
-                "    }\n" +
-                "  }" +
-                "}";
-
-        SearchTemplateRequest request = RestSearchTemplateAction.parse(newParser(source));
-        assertThat(request.getScript(), equalTo("{\"query\":{\"terms\":{\"status\":[\"{{#status}}\",\"{{.}}\",\"{{/status}}\"]}}}"));
-        assertThat(request.getScriptType(), equalTo(ScriptType.INLINE));
-        assertThat(request.getScriptParams(), nullValue());
+    @Override
+    protected SearchTemplateRequest createTestInstance() {
+        return createRandomRequest();
     }
 
-    public void testParseInlineTemplateWithParams() throws Exception {
-        String source = "{" +
-                "    'source' : {" +
-                "      'query': { 'match' : { '{{my_field}}' : '{{my_value}}' } }," +
-                "      'size' : '{{my_size}}'" +
-                "    }," +
-                "    'params' : {" +
-                "        'my_field' : 'foo'," +
-                "        'my_value' : 'bar'," +
-                "        'my_size' : 5" +
-                "    }" +
-                "}";
-
-        SearchTemplateRequest request = RestSearchTemplateAction.parse(newParser(source));
-        assertThat(request.getScript(), equalTo("{\"query\":{\"match\":{\"{{my_field}}\":\"{{my_value}}\"}},\"size\":\"{{my_size}}\"}"));
-        assertThat(request.getScriptType(), equalTo(ScriptType.INLINE));
-        assertThat(request.getScriptParams().size(), equalTo(3));
-        assertThat(request.getScriptParams(), hasEntry("my_field", "foo"));
-        assertThat(request.getScriptParams(), hasEntry("my_value", "bar"));
-        assertThat(request.getScriptParams(), hasEntry("my_size", 5));
+    @Override
+    protected Writeable.Reader<SearchTemplateRequest> instanceReader() {
+        return SearchTemplateRequest::new;
     }
 
-    public void testParseInlineTemplateAsString() throws Exception {
-        String source = "{'source' : '{\\\"query\\\":{\\\"bool\\\":{\\\"must\\\":{\\\"match\\\":{\\\"foo\\\":\\\"{{text}}\\\"}}}}}'}";
+    @Override
+    protected SearchTemplateRequest mutateInstance(SearchTemplateRequest instance) throws IOException {
+        List<Consumer<SearchTemplateRequest>> mutators = new ArrayList<>();
 
-        SearchTemplateRequest request = RestSearchTemplateAction.parse(newParser(source));
-        assertThat(request.getScript(), equalTo("{\"query\":{\"bool\":{\"must\":{\"match\":{\"foo\":\"{{text}}\"}}}}}"));
-        assertThat(request.getScriptType(), equalTo(ScriptType.INLINE));
-        assertThat(request.getScriptParams(), nullValue());
+        mutators.add(
+            request -> request.setScriptType(randomValueOtherThan(request.getScriptType(), () -> randomFrom(ScriptType.values())))
+        );
+        mutators.add(request -> request.setScript(randomValueOtherThan(request.getScript(), () -> randomAlphaOfLength(50))));
+
+        mutators.add(request -> {
+            Map<String, Object> mutatedScriptParams = new HashMap<>(request.getScriptParams());
+            String newField = randomValueOtherThanMany(mutatedScriptParams::containsKey, () -> randomAlphaOfLength(5));
+            mutatedScriptParams.put(newField, randomAlphaOfLength(10));
+            request.setScriptParams(mutatedScriptParams);
+        });
+
+        mutators.add(request -> request.setProfile(request.isProfile() == false));
+        mutators.add(request -> request.setExplain(request.isExplain() == false));
+        mutators.add(request -> request.setSimulate(request.isSimulate() == false));
+
+        mutators.add(
+            request -> request.setRequest(
+                randomValueOtherThan(
+                    request.getRequest(),
+                    () -> RandomSearchRequestGenerator.randomSearchRequest(SearchSourceBuilder::searchSource)
+                )
+            )
+        );
+
+        SearchTemplateRequest mutatedInstance = copyInstance(instance);
+        Consumer<SearchTemplateRequest> mutator = randomFrom(mutators);
+        mutator.accept(mutatedInstance);
+        return mutatedInstance;
     }
 
-    @SuppressWarnings("unchecked")
-    public void testParseInlineTemplateAsStringWithParams() throws Exception {
-        String source = "{'source' : '{\\\"query\\\":{\\\"match\\\":{\\\"{{field}}\\\":\\\"{{value}}\\\"}}}', " +
-                "'params': {'status': ['pending', 'published']}}";
+    public static SearchTemplateRequest createRandomRequest() {
+        SearchTemplateRequest request = new SearchTemplateRequest();
+        request.setScriptType(randomFrom(ScriptType.values()));
+        request.setScript(randomAlphaOfLength(50));
 
-        SearchTemplateRequest request = RestSearchTemplateAction.parse(newParser(source));
-        assertThat(request.getScript(), equalTo("{\"query\":{\"match\":{\"{{field}}\":\"{{value}}\"}}}"));
-        assertThat(request.getScriptType(), equalTo(ScriptType.INLINE));
-        assertThat(request.getScriptParams().size(), equalTo(1));
-        assertThat(request.getScriptParams(), hasKey("status"));
-        assertThat((List<String>) request.getScriptParams().get("status"), hasItems("pending", "published"));
-    }
+        Map<String, Object> scriptParams = new HashMap<>();
+        for (int i = 0; i < randomInt(10); i++) {
+            scriptParams.put(randomAlphaOfLength(5), randomAlphaOfLength(10));
+        }
+        request.setScriptParams(scriptParams);
 
-    public void testParseStoredTemplate() throws Exception {
-        String source = "{'id' : 'storedTemplate'}";
+        request.setExplain(randomBoolean());
+        request.setProfile(randomBoolean());
+        request.setSimulate(randomBoolean());
 
-        SearchTemplateRequest request = RestSearchTemplateAction.parse(newParser(source));
-        assertThat(request.getScript(), equalTo("storedTemplate"));
-        assertThat(request.getScriptType(), equalTo(ScriptType.STORED));
-        assertThat(request.getScriptParams(), nullValue());
-    }
-
-    public void testParseStoredTemplateWithParams() throws Exception {
-        String source = "{'id' : 'another_template', 'params' : {'bar': 'foo'}}";
-
-        SearchTemplateRequest request = RestSearchTemplateAction.parse(newParser(source));
-        assertThat(request.getScript(), equalTo("another_template"));
-        assertThat(request.getScriptType(), equalTo(ScriptType.STORED));
-        assertThat(request.getScriptParams().size(), equalTo(1));
-        assertThat(request.getScriptParams(), hasEntry("bar", "foo"));
-    }
-
-    public void testParseWrongTemplate() {
-        // Unclosed template id
-        expectThrows(ParsingException.class, () -> RestSearchTemplateAction.parse(newParser("{'id' : 'another_temp }")));
-    }
-
-    /**
-     * Creates a {@link XContentParser} with the given String while replacing single quote to double quotes.
-     */
-    private XContentParser newParser(String s) throws IOException {
-        assertNotNull(s);
-        return createParser(JsonXContent.jsonXContent, s.replace("'", "\""));
+        request.setRequest(RandomSearchRequestGenerator.randomSearchRequest(SearchSourceBuilder::searchSource));
+        return request;
     }
 }

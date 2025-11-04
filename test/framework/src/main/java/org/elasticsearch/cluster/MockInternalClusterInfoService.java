@@ -1,128 +1,132 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 package org.elasticsearch.cluster;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.concurrent.CountDownLatch;
-import java.util.function.Consumer;
-
-import org.elasticsearch.Version;
-import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.cluster.node.stats.NodeStats;
-import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsResponse;
-import org.elasticsearch.action.admin.indices.stats.IndicesStatsResponse;
-import org.elasticsearch.client.node.NodeClient;
+import org.elasticsearch.action.admin.indices.stats.CommonStats;
+import org.elasticsearch.action.admin.indices.stats.CommonStatsFlags;
+import org.elasticsearch.action.admin.indices.stats.ShardStats;
+import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.service.ClusterService;
-import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.core.Nullable;
+import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.index.store.StoreStats;
 import org.elasticsearch.monitor.fs.FsInfo;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
 
-import static java.util.Collections.emptyMap;
-import static java.util.Collections.emptySet;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
-/**
- * Fake ClusterInfoService class that allows updating the nodes stats disk
- * usage with fake values
- */
 public class MockInternalClusterInfoService extends InternalClusterInfoService {
 
     /** This is a marker plugin used to trigger MockNode to use this mock info service. */
     public static class TestPlugin extends Plugin {}
 
-    private final ClusterName clusterName;
-    private volatile NodeStats[] stats = new NodeStats[3];
+    @Nullable // if no fakery should take place
+    private volatile Function<ShardRouting, Long> shardSizeFunction;
 
-    /** Create a fake NodeStats for the given node and usage */
-    public static NodeStats makeStats(String nodeName, DiskUsage usage) {
-        FsInfo.Path[] paths = new FsInfo.Path[1];
-        FsInfo.Path path = new FsInfo.Path("/dev/null", null,
-            usage.getTotalBytes(), usage.getFreeBytes(), usage.getFreeBytes());
-        paths[0] = path;
-        FsInfo fsInfo = new FsInfo(System.currentTimeMillis(), null, paths);
-        return new NodeStats(new DiscoveryNode(nodeName, ESTestCase.buildNewFakeTransportAddress(), emptyMap(), emptySet(), Version.CURRENT),
-            System.currentTimeMillis(),
-            null, null, null, null, null,
-            fsInfo,
-            null, null, null,
-            null, null, null, null);
+    @Nullable // if no fakery should take place
+    private volatile BiFunction<DiscoveryNode, FsInfo.Path, FsInfo.Path> diskUsageFunction;
+
+    public MockInternalClusterInfoService(Settings settings, ClusterService clusterService, ThreadPool threadPool, NodeClient client) {
+        super(settings, clusterService, threadPool, client, EstimatedHeapUsageCollector.EMPTY, NodeUsageStatsForThreadPoolsCollector.EMPTY);
     }
 
-    public MockInternalClusterInfoService(Settings settings, ClusterService clusterService, ThreadPool threadPool, NodeClient client,
-                                          Consumer<ClusterInfo> listener) {
-        super(settings, clusterService, threadPool, client, listener);
-        this.clusterName = ClusterName.CLUSTER_NAME_SETTING.get(settings);
-        stats[0] = makeStats("node_t1", new DiskUsage("node_t1", "n1", "/dev/null", 100, 100));
-        stats[1] = makeStats("node_t2", new DiskUsage("node_t2", "n2", "/dev/null", 100, 100));
-        stats[2] = makeStats("node_t3", new DiskUsage("node_t3", "n3", "/dev/null", 100, 100));
+    public void setDiskUsageFunctionAndRefresh(BiFunction<DiscoveryNode, FsInfo.Path, FsInfo.Path> diskUsageFn) {
+        this.diskUsageFunction = diskUsageFn;
+        ClusterInfoServiceUtils.refresh(this);
     }
 
-    public void setN1Usage(String nodeName, DiskUsage newUsage) {
-        stats[0] = makeStats(nodeName, newUsage);
-    }
-
-    public void setN2Usage(String nodeName, DiskUsage newUsage) {
-        stats[1] = makeStats(nodeName, newUsage);
-    }
-
-    public void setN3Usage(String nodeName, DiskUsage newUsage) {
-        stats[2] = makeStats(nodeName, newUsage);
+    public void setShardSizeFunctionAndRefresh(Function<ShardRouting, Long> shardSizeFn) {
+        this.shardSizeFunction = shardSizeFn;
+        ClusterInfoServiceUtils.refresh(this);
     }
 
     @Override
-    public CountDownLatch updateNodeStats(final ActionListener<NodesStatsResponse> listener) {
-        NodesStatsResponse response = new NodesStatsResponse(clusterName, Arrays.asList(stats), Collections.emptyList());
-        listener.onResponse(response);
-        return new CountDownLatch(0);
-    }
-
-    @Override
-    public CountDownLatch updateIndicesStats(final ActionListener<IndicesStatsResponse> listener) {
-        // Not used, so noop
-        return new CountDownLatch(0);
-    }
-
-    @Override
-    public ClusterInfo getClusterInfo() {
-        ClusterInfo clusterInfo = super.getClusterInfo();
-        return new DevNullClusterInfo(clusterInfo.getNodeLeastAvailableDiskUsages(), clusterInfo.getNodeMostAvailableDiskUsages(), clusterInfo.shardSizes);
-    }
-
-    /**
-     * ClusterInfo that always points to DevNull.
-     */
-    public static class DevNullClusterInfo extends ClusterInfo {
-        public DevNullClusterInfo(ImmutableOpenMap<String, DiskUsage> leastAvailableSpaceUsage,
-            ImmutableOpenMap<String, DiskUsage> mostAvailableSpaceUsage, ImmutableOpenMap<String, Long> shardSizes) {
-            super(leastAvailableSpaceUsage, mostAvailableSpaceUsage, shardSizes, null);
+    List<NodeStats> adjustNodesStats(List<NodeStats> nodesStats) {
+        var diskUsageFunctionCopy = this.diskUsageFunction;
+        if (diskUsageFunctionCopy == null) {
+            return nodesStats;
         }
 
-        @Override
-        public String getDataPath(ShardRouting shardRouting) {
-            return "/dev/null";
+        return nodesStats.stream().map(nodeStats -> {
+            final DiscoveryNode discoveryNode = nodeStats.getNode();
+            final FsInfo oldFsInfo = nodeStats.getFs();
+            return new NodeStats(
+                discoveryNode,
+                nodeStats.getTimestamp(),
+                nodeStats.getIndices(),
+                nodeStats.getOs(),
+                nodeStats.getProcess(),
+                nodeStats.getJvm(),
+                nodeStats.getThreadPool(),
+                new FsInfo(
+                    oldFsInfo.getTimestamp(),
+                    oldFsInfo.getIoStats(),
+                    StreamSupport.stream(oldFsInfo.spliterator(), false)
+                        .map(fsInfoPath -> diskUsageFunctionCopy.apply(discoveryNode, fsInfoPath))
+                        .toArray(FsInfo.Path[]::new)
+                ),
+                nodeStats.getTransport(),
+                nodeStats.getHttp(),
+                nodeStats.getBreaker(),
+                nodeStats.getScriptStats(),
+                nodeStats.getDiscoveryStats(),
+                nodeStats.getIngestStats(),
+                nodeStats.getAdaptiveSelectionStats(),
+                nodeStats.getScriptCacheStats(),
+                nodeStats.getIndexingPressureStats(),
+                nodeStats.getRepositoriesStats(),
+                nodeStats.getNodeAllocationStats()
+            );
+        }).collect(Collectors.toList());
+    }
+
+    @Override
+    ShardStats[] adjustShardStats(ShardStats[] shardsStats) {
+        var shardSizeFunctionCopy = this.shardSizeFunction;
+        if (shardSizeFunctionCopy == null) {
+            return shardsStats;
         }
+
+        return Arrays.stream(shardsStats).map(shardStats -> {
+
+            var shardRouting = shardStats.getShardRouting();
+            var storeStats = new StoreStats(
+                shardSizeFunctionCopy.apply(shardRouting),
+                shardSizeFunctionCopy.apply(shardRouting),
+                shardStats.getStats().store == null ? 0L : shardStats.getStats().store.reservedSizeInBytes()
+            );
+            var commonStats = new CommonStats(new CommonStatsFlags(CommonStatsFlags.Flag.Store));
+            commonStats.store = storeStats;
+
+            return new ShardStats(
+                shardRouting,
+                commonStats,
+                shardStats.getCommitStats(),
+                shardStats.getSeqNoStats(),
+                shardStats.getRetentionLeaseStats(),
+                shardStats.getDataPath(),
+                shardStats.getStatePath(),
+                shardStats.isCustomDataPath(),
+                shardStats.isSearchIdle(),
+                shardStats.getSearchIdleTime()
+            );
+        }).toArray(ShardStats[]::new);
     }
 
     @Override

@@ -1,190 +1,178 @@
-String dirName = rootProject.projectDir.name
-rootProject.name = dirName
+import org.elasticsearch.gradle.internal.toolchain.AdoptiumJdkToolchainResolver
+import org.elasticsearch.gradle.internal.toolchain.ArchivedOracleJdkToolchainResolver
+import org.elasticsearch.gradle.internal.toolchain.OracleOpenJdkToolchainResolver
+
+pluginManagement {
+  repositories {
+    mavenCentral()
+    gradlePluginPortal()
+  }
+
+  includeBuild "build-conventions"
+  includeBuild "build-tools"
+  includeBuild "build-tools-internal"
+}
+
+plugins {
+  id "com.gradle.develocity" version "4.1.1"
+  id 'elasticsearch.java-toolchain'
+  id 'elasticsearch.component-metadata-rules'
+}
+
+enableFeaturePreview "STABLE_CONFIGURATION_CACHE"
+
+rootProject.name = "elasticsearch"
+
+dependencyResolutionManagement {
+  versionCatalogs {
+    buildLibs {
+      from(files("gradle/build.versions.toml"))
+    }
+  }
+}
+
+toolchainManagement {
+  jvm {
+    javaRepositories {
+      repository('bundledOracleOpendJdk') {
+        resolverClass = OracleOpenJdkToolchainResolver
+      }
+      repository('adoptiumJdks') {
+        resolverClass = AdoptiumJdkToolchainResolver
+      }
+      repository('archivedOracleJdks') {
+        resolverClass = ArchivedOracleJdkToolchainResolver
+      }
+    }
+  }
+}
 
 List projects = [
-  'build-tools',
   'rest-api-spec',
-  'core',
-  'core:cli',
   'docs',
   'client:rest',
-  'client:rest-high-level',
   'client:sniffer',
-  'client:transport',
   'client:test',
   'client:client-benchmark-noop-api-plugin',
   'client:benchmark',
   'benchmarks',
-  'distribution:integ-test-zip',
-  'distribution:zip',
-  'distribution:tar',
-  'distribution:deb',
-  'distribution:rpm',
-  'distribution:tools:launchers',
+  'distribution:archives:integ-test-zip',
+  'distribution:archives:windows-zip',
+  'distribution:archives:darwin-tar',
+  'distribution:archives:darwin-aarch64-tar',
+  'distribution:archives:linux-aarch64-tar',
+  'distribution:archives:linux-tar',
+  'distribution:docker',
+  'distribution:docker:cloud-ess-docker-export',
+  'distribution:docker:cloud-ess-docker-aarch64-export',
+  'distribution:docker:docker-aarch64-export',
+  'distribution:docker:docker-export',
+  'distribution:docker:ironbank-docker-aarch64-export',
+  'distribution:docker:ironbank-docker-export',
+  'distribution:docker:wolfi-docker-aarch64-export',
+  'distribution:docker:wolfi-docker-export',
+  'distribution:docker:cloud-ess-fips-docker-export',
+  'distribution:docker:cloud-ess-fips-docker-aarch64-export',
+  'distribution:packages:aarch64-deb',
+  'distribution:packages:deb',
+  'distribution:packages:aarch64-rpm',
+  'distribution:packages:rpm',
+  'distribution:bwc:major1',
+  'distribution:bwc:major2',
+  'distribution:bwc:major3',
+  'distribution:bwc:major4',
+  'distribution:bwc:minor1',
+  'distribution:bwc:minor2',
+  'distribution:bwc:minor3',
+  'distribution:bwc:minor4',
+  'distribution:bwc:main',
+  'distribution:tools:java-version-checker',
+  'distribution:tools:cli-launcher',
+  'distribution:tools:server-cli',
+  'distribution:tools:windows-service-cli',
   'distribution:tools:plugin-cli',
+  'distribution:tools:keystore-cli',
+  'distribution:tools:geoip-cli',
+  'distribution:tools:ansi-console',
+  'server',
   'test:framework',
-  'test:fixtures:example-fixture',
+  'test:fixtures:aws-ec2-fixture',
+  'test:fixtures:aws-fixture-utils',
+  'test:fixtures:aws-sts-fixture',
+  'test:fixtures:azure-fixture',
+  'test:fixtures:ec2-imds-fixture',
+  'test:fixtures:gcs-fixture',
   'test:fixtures:hdfs-fixture',
   'test:fixtures:krb5kdc-fixture',
+  'test:fixtures:minio-fixture',
   'test:fixtures:old-elasticsearch',
+  'test:fixtures:s3-fixture',
+  'test:fixtures:testcontainer-utils',
+  'test:fixtures:geoip-fixture',
+  'test:fixtures:url-fixture',
   'test:logger-usage',
-  'libs:elasticsearch-nio',
-  'modules:aggs-matrix-stats',
-  'modules:analysis-common',
-  'modules:ingest-common',
-  'modules:lang-expression',
-  'modules:lang-mustache',
-  'modules:lang-painless',
-  'modules:mapper-extras',
-  'modules:parent-join',
-  'modules:percolator',
-  'modules:rank-eval',
-  'modules:reindex',
-  'modules:repository-url',
-  'modules:transport-netty4',
-  'modules:tribe',
-  'plugins:analysis-icu',
-  'plugins:analysis-kuromoji',
-  'plugins:analysis-phonetic',
-  'plugins:analysis-smartcn',
-  'plugins:analysis-stempel',
-  'plugins:analysis-ukrainian',
-  'plugins:discovery-azure-classic',
-  'plugins:discovery-ec2',
-  'plugins:discovery-file',
-  'plugins:discovery-gce',
-  'plugins:ingest-geoip',
-  'plugins:ingest-attachment',
-  'plugins:ingest-user-agent',
-  'plugins:mapper-murmur3',
-  'plugins:mapper-size',
-  'plugins:repository-azure',
-  'plugins:repository-gcs',
-  'plugins:repository-hdfs',
-  'plugins:repository-s3',
-  'plugins:jvm-example',
-  'plugins:store-smb',
-  'plugins:transport-nio',
-  'qa:auto-create-index',
-  'qa:ccs-unavailable-clusters',
-  'qa:evil-tests',
-  'qa:full-cluster-restart',
-  'qa:integration-bwc',
-  'qa:mixed-cluster',
-  'qa:multi-cluster-search',
-  'qa:no-bootstrap-tests',
-  'qa:reindex-from-old',
-  'qa:rolling-upgrade',
-  'qa:smoke-test-client',
-  'qa:smoke-test-http',
-  'qa:smoke-test-ingest-with-all-dependencies',
-  'qa:smoke-test-ingest-disabled',
-  'qa:smoke-test-multinode',
-  'qa:smoke-test-rank-eval-with-mustache',
-  'qa:smoke-test-plugins',
-  'qa:smoke-test-reindex-with-all-modules',
-  'qa:smoke-test-tribe-node',
-  'qa:vagrant',
-  'qa:verify-version-constants',
-  'qa:wildfly',
-  'qa:query-builder-bwc'
+  'test:test-clusters',
+  'test:x-content',
+  'test:yaml-rest-runner',
+  'test:metadata-extractor',
+  'test:immutable-collections-patch'
 ]
 
-File examplePluginsDir = new File(rootProject.projectDir, 'plugins/examples')
-List<String> examplePlugins = []
-for (File example : examplePluginsDir.listFiles()) {
-  if (example.isDirectory() == false) continue;
-  if (example.name.startsWith('build') || example.name.startsWith('.')) continue;
-  projects.add("example-plugins:${example.name}".toString())
-  examplePlugins.add(example.name)
-}
-
-projects.add("libs")
-File libsDir = new File(rootProject.projectDir, 'libs')
-for (File libDir : new File(rootProject.projectDir, 'libs').listFiles()) {
-  if (libDir.isDirectory() == false) continue;
-  if (libDir.name.startsWith('build') || libDir.name.startsWith('.')) continue;
-  projects.add("libs:${libDir.name}".toString())
-}
-
-/* Create projects for building BWC snapshot distributions from the heads of other branches */
-final List<String> branches = ['5.6', '6.0', '6.1', '6.x']
-for (final String branch : branches) {
-  projects.add("distribution:bwc-snapshot-${branch}".toString())
-}
-
-boolean isEclipse = System.getProperty("eclipse.launcher") != null || gradle.startParameter.taskNames.contains('eclipse') || gradle.startParameter.taskNames.contains('cleanEclipse')
-if (isEclipse) {
-  // eclipse cannot handle an intermediate dependency between main and test, so we must create separate projects
-  // for core-src and core-tests
-  projects << 'core-tests'
-  projects << 'libs:elasticsearch-nio-tests'
-}
-
-include projects.toArray(new String[0])
-
-project(':build-tools').projectDir = new File(rootProject.projectDir, 'buildSrc')
-project(':example-plugins').projectDir = new File(rootProject.projectDir, 'plugins/examples')
-
-for (String example : examplePlugins) {
-  project(":example-plugins:${example}").projectDir = new File(rootProject.projectDir, "plugins/examples/${example}")
-}
-
-/* The BWC snapshot projects share the same build directory and build file,
- * but apply to different backwards compatibility branches. */
-for (final String branch : branches) {
-  project(":distribution:bwc-snapshot-${branch}").projectDir = new File(rootProject.projectDir, 'distribution/bwc')
-}
-
-if (isEclipse) {
-  project(":core").projectDir = new File(rootProject.projectDir, 'core/src/main')
-  project(":core").buildFileName = 'eclipse-build.gradle'
-  project(":core-tests").projectDir = new File(rootProject.projectDir, 'core/src/test')
-  project(":core-tests").buildFileName = 'eclipse-build.gradle'
-  project(":libs:elasticsearch-nio").projectDir = new File(rootProject.projectDir, 'libs/elasticsearch-nio/src/main')
-  project(":libs:elasticsearch-nio").buildFileName = 'eclipse-build.gradle'
-  project(":libs:elasticsearch-nio-tests").projectDir = new File(rootProject.projectDir, 'libs/elasticsearch-nio/src/test')
-  project(":libs:elasticsearch-nio-tests").buildFileName = 'eclipse-build.gradle'
-}
-
 /**
-  * Iterates over sub directories, looking for build.gradle, and adds a project if found
-  * for that dir with the given path prefix. Note that this requires each level
-  * of the dir hierarchy to have a build.gradle. Otherwise we would have to iterate
-  * all files/directories in the source tree to find all projects.
-  */
-void addSubProjects(String path, File dir, List<String> projects, List<String> branches) {
+ * Iterates over sub directories, looking for build.gradle, and adds a project if found
+ * for that dir with the given path prefix. Note that this requires each level
+ * of the dir hierarchy to have a build.gradle. Otherwise we would have to iterate
+ * all files/directories in the source tree to find all projects.
+ */
+void addSubProjects(String path, File dir) {
   if (dir.isDirectory() == false) return;
   if (dir.name == 'buildSrc') return;
   if (new File(dir, 'build.gradle').exists() == false) return;
+  if (new File(dir, 'settings.gradle').exists()) return;
+  if (findProject(dir) != null) return;
 
   final String projectName = "${path}:${dir.name}"
-  include projectName
 
-  if (dir.name == 'bwc-snapshot-dummy-projects') {
-    for (final String branch : branches) {
-      final String snapshotProjectName = "${projectName}:bwc-snapshot-${branch}"
-      projects.add(snapshotProjectName)
-      include snapshotProjectName
-      project("${snapshotProjectName}").projectDir = dir
-    }
-    // TODO do we want to assert that there's nothing else in the bwc directory?
-  } else {
-    if (path.isEmpty()) {
-      project(projectName).projectDir = dir
-    }
-    for (File subdir : dir.listFiles()) {
-      addSubProjects(projectName, subdir, projects, branches)
-    }
+  // This project has a problem with availability of Docker images after
+  // release. Disabling individual tasks is tricky because it uses test
+  // fixtures, so instead just skip the project entirely until we can
+  // work out a way forward.
+  if (projectName.equals(":qa:apm")) {
+    return
   }
+
+  include projectName
+  if (path.isEmpty() || path.startsWith(':example-plugins')) {
+    project(projectName).projectDir = dir
+  }
+  for (File subdir : dir.listFiles()) {
+    addSubProjects(projectName, subdir)
+  }
+}
+
+addSubProjects('', new File(rootProject.projectDir, 'libs'))
+addSubProjects('', new File(rootProject.projectDir, 'modules'))
+addSubProjects('', new File(rootProject.projectDir, 'plugins'))
+addSubProjects('', new File(rootProject.projectDir, 'qa'))
+addSubProjects('test', new File(rootProject.projectDir, 'test/external-modules'))
+addSubProjects('', new File(rootProject.projectDir, 'x-pack'))
+addSubProjects('', new File(rootProject.projectDir, 'x-pack/libs'))
+addSubProjects('', new File(rootProject.projectDir, 'x-pack/extras/plugins'))
+
+include projects.toArray(new String[0])
+
+project(":libs:native:libraries").name = "native-libraries"
+
+project(":test:external-modules").children.each { testProject ->
+  testProject.name = "test-${testProject.name}"
 }
 
 // look for extra plugins for elasticsearch
-File extraProjects = new File(rootProject.projectDir.parentFile, "${dirName}-extra")
+File extraProjects = new File(rootProject.projectDir.parentFile, "${rootProject.projectDir.name}-extra")
 if (extraProjects.exists()) {
   for (File extraProjectDir : extraProjects.listFiles()) {
-    addSubProjects('', extraProjectDir, projects, branches)
+    addSubProjects('', extraProjectDir)
   }
 }
-include 'libs'
 
+include 'qa:vector'

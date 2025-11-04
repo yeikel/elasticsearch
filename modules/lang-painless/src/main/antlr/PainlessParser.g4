@@ -1,20 +1,10 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 parser grammar PainlessParser;
@@ -33,23 +23,31 @@ parameters
     : LP ( decltype ID ( COMMA decltype ID )* )? RP
     ;
 
+statement
+    : rstatement
+    | dstatement ( SEMICOLON | EOF )
+    ;
+
 // Note we use a predicate on the if/else case here to prevent the
 // "dangling-else" ambiguity by forcing the 'else' token to be consumed
 // as soon as one is found.  See (https://en.wikipedia.org/wiki/Dangling_else).
-statement
+rstatement
     : IF LP expression RP trailer ( ELSE trailer | { _input.LA(1) != ELSE }? )                 # if
     | WHILE LP expression RP ( trailer | empty )                                               # while
-    | DO block WHILE LP expression RP delimiter                                                # do
     | FOR LP initializer? SEMICOLON expression? SEMICOLON afterthought? RP ( trailer | empty ) # for
     | FOR LP decltype ID COLON expression RP trailer                                           # each
     | FOR LP ID IN expression RP trailer                                                       # ineach
-    | declaration delimiter                                                                    # decl
-    | CONTINUE delimiter                                                                       # continue
-    | BREAK delimiter                                                                          # break
-    | RETURN expression delimiter                                                              # return
     | TRY block trap+                                                                          # try
-    | THROW expression delimiter                                                               # throw
-    | expression delimiter                                                                     # expr
+    ;
+
+dstatement
+    : DO block WHILE LP expression RP # do
+    | declaration                     # decl
+    | CONTINUE                        # continue
+    | BREAK                           # break
+    | RETURN expression?              # return
+    | THROW expression                # throw
+    | expression                      # expr
     ;
 
 trailer
@@ -58,7 +56,7 @@ trailer
     ;
 
 block
-    : LBRACK statement* RBRACK
+    : LBRACK statement* dstatement? RBRACK
     ;
 
 empty
@@ -79,7 +77,13 @@ declaration
     ;
 
 decltype
-    : TYPE (LBRACE RBRACE)*
+    : type (LBRACE RBRACE)*
+    ;
+
+type
+    : DEF
+    | PRIMITIVE
+    | ID (DOT DOTID)*
     ;
 
 declvar
@@ -87,47 +91,66 @@ declvar
     ;
 
 trap
-    : CATCH LP TYPE ID RP block
+    : CATCH LP type ID RP block
     ;
 
-delimiter
-    : SEMICOLON
-    | EOF
+noncondexpression
+    :               unary                                                       # single
+    |               noncondexpression ( MUL | DIV | REM ) noncondexpression     # binary
+    |               noncondexpression ( ADD | SUB ) noncondexpression           # binary
+    |               noncondexpression ( FIND | MATCH ) noncondexpression        # binary
+    |               noncondexpression ( LSH | RSH | USH ) noncondexpression     # binary
+    |               noncondexpression ( LT | LTE | GT | GTE ) noncondexpression # comp
+    |               noncondexpression INSTANCEOF decltype                       # instanceof
+    |               noncondexpression ( EQ | EQR | NE | NER ) noncondexpression # comp
+    |               noncondexpression BWAND noncondexpression                   # binary
+    |               noncondexpression XOR noncondexpression                     # binary
+    |               noncondexpression BWOR noncondexpression                    # binary
+    |               noncondexpression BOOLAND noncondexpression                 # bool
+    |               noncondexpression BOOLOR noncondexpression                  # bool
+    | <assoc=right> noncondexpression ELVIS noncondexpression                   # elvis
     ;
 
 expression
-    :               unary                                                 # single
-    |               expression ( MUL | DIV | REM ) expression             # binary
-    |               expression ( ADD | SUB ) expression                   # binary
-    |               expression ( FIND | MATCH ) expression                # binary
-    |               expression ( LSH | RSH | USH ) expression             # binary
-    |               expression ( LT | LTE | GT | GTE ) expression         # comp
-    |               expression INSTANCEOF decltype                        # instanceof
-    |               expression ( EQ | EQR | NE | NER ) expression         # comp
-    |               expression BWAND expression                           # binary
-    |               expression XOR expression                             # binary
-    |               expression BWOR expression                            # binary
-    |               expression BOOLAND expression                         # bool
-    |               expression BOOLOR expression                          # bool
-    | <assoc=right> expression COND expression COLON expression           # conditional
-    | <assoc=right> expression ELVIS expression                           # elvis
-    | <assoc=right> expression ( ASSIGN | AADD | ASUB | AMUL |
-                                 ADIV   | AREM | AAND | AXOR |
-                                 AOR    | ALSH | ARSH | AUSH ) expression # assignment
+    :               noncondexpression                                            # nonconditional
+    | <assoc=right> noncondexpression COND expression COLON expression           # conditional
+    | <assoc=right> noncondexpression ( ASSIGN | AADD | ASUB | AMUL |
+                                        ADIV   | AREM | AAND | AXOR |
+                                        AOR    | ALSH | ARSH | AUSH ) expression # assignment
     ;
 
 unary
-    :  ( INCR | DECR ) chain                 # pre
-    |  chain (INCR | DECR )                  # post
-    |  chain                                 # read
-    |  ( BOOLNOT | BWNOT | ADD | SUB ) unary # operator
-    |  LP decltype RP unary                  # cast
+    : ( INCR | DECR ) chain # pre
+    | ( ADD | SUB ) unary   # addsub
+    | unarynotaddsub        # notaddsub
+    ;
+
+unarynotaddsub
+    : chain                     # read
+    | chain (INCR | DECR )      # post
+    | ( BOOLNOT | BWNOT ) unary # not
+    | castexpression            # cast
+    ;
+
+castexpression
+    : LP primordefcasttype RP unary    # primordefcast
+    | LP refcasttype RP unarynotaddsub # refcast
+    ;
+
+primordefcasttype
+    : DEF
+    | PRIMITIVE
+    ;
+
+refcasttype
+    : DEF (LBRACE RBRACE)+
+    | PRIMITIVE (LBRACE RBRACE)+
+    | ID (DOT DOTID)* (LBRACE RBRACE)*
     ;
 
 chain
-    : primary postfix*          # dynamic
-    | decltype postdot postfix* # static
-    | arrayinitializer          # newarray
+    : primary postfix* # dynamic
+    | arrayinitializer # newarray
     ;
 
 primary
@@ -141,8 +164,8 @@ primary
     | listinitializer                     # listinit
     | mapinitializer                      # mapinit
     | ID                                  # variable
-    | ID arguments                        # calllocal
-    | NEW TYPE arguments                  # newobject
+    | (ID | DOLLAR) arguments             # calllocal
+    | NEW type arguments                  # newobject
     ;
 
 postfix
@@ -169,8 +192,8 @@ braceaccess
     ;
 
 arrayinitializer
-    : NEW TYPE ( LBRACE expression RBRACE )+ ( postdot postfix* )?                                   # newstandardarray
-    | NEW TYPE LBRACE RBRACE LBRACK ( expression ( COMMA expression )* )? SEMICOLON? RBRACK postfix* # newinitializedarray
+    : NEW type ( LBRACE expression RBRACE )+ ( postdot postfix* )?                        # newstandardarray
+    | NEW type LBRACE RBRACE LBRACK ( expression ( COMMA expression )* )? RBRACK postfix* # newinitializedarray
     ;
 
 listinitializer
@@ -206,10 +229,7 @@ lamtype
     ;
 
 funcref
-    : TYPE REF ID      # classfuncref       // reference to a static or instance method,
-                                            // e.g. ArrayList::size or Integer::compare
-    | decltype REF NEW # constructorfuncref // reference to a constructor, e.g. ArrayList::new
-    | ID REF ID        # capturingfuncref   // reference to an instance method, e.g. object::toString
-                                            // currently limited to capture of a simple variable (id).
-    | THIS REF ID      # localfuncref       // reference to a local function, e.g. this::myfunc
+    : decltype REF ID  # classfuncref
+    | decltype REF NEW # constructorfuncref
+    | THIS REF ID      # localfuncref
     ;

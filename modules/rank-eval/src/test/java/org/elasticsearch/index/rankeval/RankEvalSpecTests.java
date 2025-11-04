@@ -1,31 +1,17 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
 package org.elasticsearch.index.rankeval;
 
+import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
-import org.elasticsearch.common.xcontent.NamedXContentRegistry;
-import org.elasticsearch.common.xcontent.ToXContent;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentFactory;
-import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.index.query.MatchAllQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.rankeval.RankEvalSpec.ScriptWithId;
@@ -33,6 +19,13 @@ import org.elasticsearch.script.Script;
 import org.elasticsearch.script.ScriptType;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.xcontent.NamedXContentRegistry;
+import org.elasticsearch.xcontent.ToXContent;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentFactory;
+import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentType;
+import org.elasticsearch.xcontent.json.JsonXContent;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -47,6 +40,8 @@ import java.util.Map.Entry;
 import java.util.function.Supplier;
 
 import static org.elasticsearch.test.EqualsHashCodeTestUtils.checkEqualsAndHashCode;
+import static org.elasticsearch.test.XContentTestUtils.insertRandomFields;
+import static org.hamcrest.Matchers.containsString;
 
 public class RankEvalSpecTests extends ESTestCase {
 
@@ -65,11 +60,15 @@ public class RankEvalSpecTests extends ESTestCase {
         return result;
     }
 
-    private static RankEvalSpec createTestItem() throws IOException {
-        Supplier<EvaluationMetric> metric = randomFrom(Arrays.asList(
+    static RankEvalSpec createTestItem() {
+        Supplier<EvaluationMetric> metric = randomFrom(
+            Arrays.asList(
                 () -> PrecisionAtKTests.createTestItem(),
+                () -> RecallAtKTests.createTestItem(),
                 () -> MeanReciprocalRankTests.createTestItem(),
-                () -> DiscountedCumulativeGainTests.createTestItem()));
+                () -> DiscountedCumulativeGainTests.createTestItem()
+            )
+        );
 
         List<RatedRequest> ratedRequests = null;
         Collection<ScriptWithId> templates = null;
@@ -81,7 +80,10 @@ public class RankEvalSpecTests extends ESTestCase {
                 builder.startObject();
                 builder.field("field", randomAlphaOfLengthBetween(1, 5));
                 builder.endObject();
-                script = builder.string();
+                script = Strings.toString(builder);
+            } catch (IOException e) {
+                // this shouldn't happen in tests, re-throw just not to swallow it
+                throw new RuntimeException(e);
             }
 
             templates = new HashSet<>();
@@ -89,12 +91,19 @@ public class RankEvalSpecTests extends ESTestCase {
 
             Map<String, Object> templateParams = new HashMap<>();
             templateParams.put("key", "value");
-            RatedRequest ratedRequest = new RatedRequest("id", Arrays.asList(RatedDocumentTests.createRatedDocument()), templateParams,
-                    "templateId");
+            RatedRequest ratedRequest = new RatedRequest(
+                "id",
+                Arrays.asList(RatedDocumentTests.createRatedDocument()),
+                templateParams,
+                "templateId"
+            );
             ratedRequests = Arrays.asList(ratedRequest);
         } else {
-            RatedRequest ratedRequest = new RatedRequest("id", Arrays.asList(RatedDocumentTests.createRatedDocument()),
-                    new SearchSourceBuilder());
+            RatedRequest ratedRequest = new RatedRequest(
+                "id",
+                Arrays.asList(RatedDocumentTests.createRatedDocument()),
+                new SearchSourceBuilder()
+            );
             ratedRequests = Arrays.asList(ratedRequest);
         }
         RankEvalSpec spec = new RankEvalSpec(ratedRequests, metric.get(), templates);
@@ -104,22 +113,28 @@ public class RankEvalSpecTests extends ESTestCase {
         for (int i = 0; i < size; i++) {
             indices.add(randomAlphaOfLengthBetween(0, 50));
         }
-        spec.addIndices(indices);
         return spec;
     }
 
     public void testXContentRoundtrip() throws IOException {
         RankEvalSpec testItem = createTestItem();
         XContentBuilder shuffled = shuffleXContent(testItem.toXContent(XContentFactory.jsonBuilder(), ToXContent.EMPTY_PARAMS));
-        try (XContentParser parser = createParser(JsonXContent.jsonXContent, shuffled.bytes())) {
-
-            RankEvalSpec parsedItem = RankEvalSpec.parse(parser);
-            // indices, come from URL parameters, so they don't survive xContent roundtrip
-            // for the sake of being able to use equals() next, we add it to the parsed object
-            parsedItem.addIndices(testItem.getIndices());
+        try (XContentParser parser = createParser(JsonXContent.jsonXContent, BytesReference.bytes(shuffled))) {
+            RankEvalSpec parsedItem = RankEvalSpec.parse(parser, nf -> false);
             assertNotSame(testItem, parsedItem);
             assertEquals(testItem, parsedItem);
             assertEquals(testItem.hashCode(), parsedItem.hashCode());
+        }
+    }
+
+    public void testXContentParsingIsNotLenient() throws IOException {
+        RankEvalSpec testItem = createTestItem();
+        XContentType xContentType = randomFrom(XContentType.values());
+        BytesReference originalBytes = toShuffledXContent(testItem, xContentType, ToXContent.EMPTY_PARAMS, randomBoolean());
+        BytesReference withRandomFields = insertRandomFields(xContentType, originalBytes, null, random());
+        try (XContentParser parser = createParser(xContentType.xContent(), withRandomFields)) {
+            Exception exception = expectThrows(Exception.class, () -> RankEvalSpec.parse(parser, nf -> false));
+            assertThat(exception.getMessage(), containsString("[rank_eval] failed to parse field"));
         }
     }
 
@@ -135,8 +150,10 @@ public class RankEvalSpecTests extends ESTestCase {
         List<NamedWriteableRegistry.Entry> namedWriteables = new ArrayList<>();
         namedWriteables.add(new NamedWriteableRegistry.Entry(QueryBuilder.class, MatchAllQueryBuilder.NAME, MatchAllQueryBuilder::new));
         namedWriteables.add(new NamedWriteableRegistry.Entry(EvaluationMetric.class, PrecisionAtK.NAME, PrecisionAtK::new));
+        namedWriteables.add(new NamedWriteableRegistry.Entry(EvaluationMetric.class, RecallAtK.NAME, RecallAtK::new));
         namedWriteables.add(
-                new NamedWriteableRegistry.Entry(EvaluationMetric.class, DiscountedCumulativeGain.NAME, DiscountedCumulativeGain::new));
+            new NamedWriteableRegistry.Entry(EvaluationMetric.class, DiscountedCumulativeGain.NAME, DiscountedCumulativeGain::new)
+        );
         namedWriteables.add(new NamedWriteableRegistry.Entry(EvaluationMetric.class, MeanReciprocalRank.NAME, MeanReciprocalRank::new));
         return ESTestCase.copyWriteable(original, new NamedWriteableRegistry(namedWriteables), RankEvalSpec::new);
     }
@@ -145,33 +162,29 @@ public class RankEvalSpecTests extends ESTestCase {
         checkEqualsAndHashCode(createTestItem(), RankEvalSpecTests::copy, RankEvalSpecTests::mutateTestItem);
     }
 
-    private static RankEvalSpec mutateTestItem(RankEvalSpec original) {
+    static RankEvalSpec mutateTestItem(RankEvalSpec original) {
         List<RatedRequest> ratedRequests = new ArrayList<>(original.getRatedRequests());
         EvaluationMetric metric = original.getMetric();
         Map<String, Script> templates = new HashMap<>(original.getTemplates());
-        List<String> indices = new ArrayList<>(original.getIndices());
 
-        int mutate = randomIntBetween(0, 3);
+        int mutate = randomIntBetween(0, 2);
         switch (mutate) {
-        case 0:
-            RatedRequest request = RatedRequestsTests.createTestItem(true);
-            ratedRequests.add(request);
-            break;
-        case 1:
-            if (metric instanceof PrecisionAtK) {
-                metric = new DiscountedCumulativeGain();
-            } else {
-                metric = new PrecisionAtK();
-            }
-            break;
-        case 2:
-            templates.put("mutation", new Script(ScriptType.INLINE, "mustache", randomAlphaOfLength(10), new HashMap<>()));
-            break;
-        case 3:
-            indices.add(randomAlphaOfLength(5));
-            break;
-        default:
-            throw new IllegalStateException("Requested to modify more than available parameters.");
+            case 0:
+                RatedRequest request = RatedRequestsTests.createTestItem(true);
+                ratedRequests.add(request);
+                break;
+            case 1:
+                if (metric instanceof PrecisionAtK) {
+                    metric = new DiscountedCumulativeGain();
+                } else {
+                    metric = new PrecisionAtK();
+                }
+                break;
+            case 2:
+                templates.put("mutation", new Script(ScriptType.INLINE, "mustache", randomAlphaOfLength(10), new HashMap<>()));
+                break;
+            default:
+                throw new IllegalStateException("Requested to modify more than available parameters.");
         }
 
         List<ScriptWithId> scripts = new ArrayList<>();
@@ -179,7 +192,6 @@ public class RankEvalSpecTests extends ESTestCase {
             scripts.add(new ScriptWithId(entry.getKey(), entry.getValue()));
         }
         RankEvalSpec result = new RankEvalSpec(ratedRequests, metric, scripts);
-        result.addIndices(indices);
         return result;
     }
 
